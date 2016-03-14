@@ -140,9 +140,17 @@ RETURN
 ********************************************************************************
 PROCEDURE ToolCode
 
-#DEFINE ccCRLF            CHR(13)+CHR(10)
-#DEFINE ccLOGFILE         "DBCIntegrityCheckLog.txt"
-#DEFINE ccDBCVALIDATEFILE "DBCValidate.txt"
+#DEFINE ccCRLF                 CHR(13)+CHR(10)
+#DEFINE ccLOGFILE              "DBCIntegrityCheckLog.txt"
+#DEFINE ccDBCVALIDATEFILE      "DBCValidate.txt"
+
+* Internationalization opportunities
+#DEFINE ccRECORDSLITERAL       "Records"
+#DEFINE ccTAGSLITERAL          "Tags"
+#DEFINE ccSUCCESSMSG           "successfully opened..."
+#DEFINE ccFAILEDMSG            " ************** FAILED..."
+#DEFINE ccEMPTYTABLELITERAL    "EMPTY TABLE"
+#DEFINE ccBADINDEXCOUNTLITERAL "BAD TAG COUNT"
 
 LOCAL loException as Exception,;
       lcLogText , ;
@@ -157,7 +165,8 @@ LOCAL loException as Exception,;
       lnFreeTables, ;
       lnI, ;
       lnOpenedFree, ;
-      lnTables
+      lnTables, ;
+      lnTags
 
 lcOldSafety = SET("Safety")
 SET SAFETY OFF
@@ -167,6 +176,8 @@ CD ?
 lcLogText = TRANSFORM(DATETIME()) + ccCRLF
 
 TRY
+   CloseData()
+   
    lnDBCFiles = ADIR(laDatabases, "*.DBC")
    
    IF lnDBCFiles = 1
@@ -178,11 +189,13 @@ TRY
    IF EMPTY(lcDBCFile)
       * Nothing to do
    ELSE
+      WAIT WINDOW "Building temporary cursor of DBCX Metadata..." NOWAIT 
+      CollectDBCXMetadata()
+
       WAIT WINDOW "Opening database, please wait..." NOWAIT 
-      
       OPEN DATABASE (m.lcDBCFile) SHARED 
       SET DATABASE TO (JUSTSTEM(m.lcDBCFile))
-
+      
       lcLogText = m.lcLogText + ;
                   "DBC: " + LOWER(FULLPATH(DBC())) + ccCRLF + ;
                   "Current Folder: " + FULLPATH(CURDIR()) + ccCRLF + ccCRLF
@@ -215,27 +228,56 @@ TRY
          DO WHILE m.lnI <= m.lnTables 
          
             TRY
+               lcAlias = JUSTSTEM(laTables[lnI])
+               
                WAIT WINDOW LOWER(laTables[lnI]) + " - " + TRANSFORM((m.lnI/m.lnTables)*100) + "%" NOWAIT 
                
                USE (laTables[lnI]) SHARED AGAIN IN 0 NOUPDATE 
                lnOpened  = m.lnOpened + 1 
                lcLogText = m.lcLogText + ;
                            PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
-                           ALLTRIM(laTables[lnI]) + " successfully opened..." + ;
-                           FULLPATH(DBF(laTables[lnI])) + ccCRLF
+                           ALLTRIM(laTables[lnI]) + SPACE(1) + ccSUCCESSMSG + ;
+                           FULLPATH(DBF(laTables[lnI])) 
+
+               lnTags    = ATAGINFO(laTags, SPACE(0), m.lcAlias)
+
+               lcLogText = m.lcLogText + ;
+                           ":  " + ;
+                           TRANSFORM(RECCOUNT(m.lcAlias)) + SPACE(1) + ccRECORDSLITERAL + ", " + ;
+                           TRANSFORM(m.lnTags) + SPACE(1) + ccTAGSLITERAL
+
+               lcLogText = m.lcLogText + ;
+                           IIF(RECCOUNT(m.lcAlias) = 0, SPACE(3) + "** " + ccEMPTYTABLELITERAL + " **", "")
+               
+               lnCoreMetaTags = GetTypeCount(LOWER(JUSTSTEM(m.lcDBCFile)), LOWER(m.lcAlias) + ".", "I")
+               
+               IF ISNULL(m.lnCoreMetaTags)
+                  * Nothing to report for the index tags
+               ELSE
+                  IF m.lnTags # m.lnCoreMetaTags
+                     lcLogText = m.lcLogText + ;
+                                 SPACE(3) + ; 
+                                 "** " + ccBADINDEXCOUNTLITERAL + " ** - " + ;
+                                 TRANSFORM(m.lnTags) + " table tags and " + ;
+                                 TRANSFORM(m.lnCoreMetaTags) + " metadata tags"
+                  ENDIF 
+               ENDIF 
+
+               lcLogText = m.lcLogText + ccCRLF
 
                USE IN (SELECT(laTables[lnI]))
                
                *? Potential optional future enhancements for the process:
                *?  - Scan tables
                *?  - Read memo
+               *?  - Incorporate details from Index Integrity tool like how close table is to 2 GB limit
                
             CATCH TO loException   
                lnFailed  = m.lnFailed + 1 
                lcLogText = m.lcLogText + ;
                            ccCRLF + ;
                            PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
-                           ALLTRIM(laTables[lnI]) + " ************** FAILED..." + m.loException.Message + ;
+                           ALLTRIM(laTables[lnI]) + SPACE(1) + ccFAILEDMSG + m.loException.Message + ;
                            ccCRLF + ccCRLF
 
             ENDTRY
@@ -269,6 +311,7 @@ TRY
          DO WHILE m.lnI <= m.lnFreeTables 
             TRY
                lcFreeTable = ALLTRIM(curFreetables.cObjectNam)
+               lcFreeAlias = JUSTSTEM(lcFreeTable)
                
                WAIT WINDOW LOWER(m.lcFreeTable) + " - " + TRANSFORM((m.lnI/m.lnFreeTables)*100) + "%" NOWAIT 
                
@@ -276,9 +319,21 @@ TRY
                lnOpenedFree = m.lnOpenedFree + 1 
                lcLogText    = m.lcLogText + ;
                               PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnFreeTables)), "0") + ")  " + ;
-                              ALLTRIM(m.lcFreeTable) + " successfully opened..." + ;
-                              FULLPATH(DBF(m.lcFreeTable)) + ccCRLF
+                              ALLTRIM(m.lcFreeTable) + SPACE(1) + ccSUCCESSMSG + ;
+                              FULLPATH(DBF(m.lcFreeTable)) 
 
+               lnTags    = ATAGINFO(laTags, SPACE(0), lcFreeTable)
+
+               lcLogText = m.lcLogText + ;
+                           ":  " + ;
+                           TRANSFORM(RECCOUNT(lcFreeTable)) + SPACE(1) + ccRECORDSLITERAL + ", " + ;
+                           TRANSFORM(lnTags) + SPACE(1) + ccTAGSLITERAL
+
+               lcLogText = m.lcLogText + ;
+                           IIF(RECCOUNT(lcFreeTable) = 0, "** " + ccEMPTYTABLELITERAL + " **", "")
+
+               lcLogText = m.lcLogText + ccCRLF
+               
                USE IN (SELECT(m.lcFreeTable))
                
                *? Potential optional future enhancements for the process:
@@ -290,7 +345,8 @@ TRY
                lcLogText     = m.lcLogText + ;
                                ccCRLF + ;
                                PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
-                               ALLTRIM(laTables[lnI]) + " ************** FAILED..." + m.loException.Message + ;
+                               ALLTRIM(laTables[lnI]) + SPACE(1) + ccFAILEDMSG + ;
+                               m.loException.Message + ;
                                " on line " + TRANSFORM(m.loException.LineNo) + ;
                                ccCRLF + ccCRLF
 
@@ -315,7 +371,9 @@ TRY
                   "DBC Integrity Check is complete: " + TRANSFORM(DATETIME())
       
       STRTOFILE(m.lcLogText, ccLOGFILE, 0)
-      MODIFY FILE (ccLOGFILE) NOEDIT RANGE 1,1
+      MODIFY FILE (ccLOGFILE) NOEDIT RANGE 1,1 NOWAIT 
+
+      CLOSE DATABASES 
    ENDIF 
    
 CATCH TO loException
@@ -336,5 +394,128 @@ SET SAFETY &lcOldSafety
 CLOSE DATABASES ALL 
 
 RETURN  
+
+
+********************************************************************************
+*  METHOD NAME: CollectDBCXMetadata
+*
+*  AUTHOR: Richard A. Schummer, February 2016
+*
+*  METHOD DESCRIPTION:
+*    This method is called to build a temp cursor of DBCX metadata in case 
+*    CoreMeta is used in the data integrity checking process.
+*
+*  INPUT PARAMETERS:
+*    None
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE CollectDBCXMetadata()
+
+LOCAL llReturnVal, ;
+      lnOldSelect
+
+llReturnVal = .T.
+
+TRY 
+   lnOldSelect = SELECT()
+   
+   USE CoreMeta IN 0 SHARED NOUPDATE 
+   
+   SELECT * ;
+      FROM CoreMeta ;
+      INTO TABLE (ADDBS(SYS(2023)) + "curDBCXCoreMeta") NOFILTER 
+
+   SELECT curDBCXCoreMeta
+   INDEX ON cDBCName   TAG DBCName ADDITIVE 
+   INDEX ON cObjectNam TAG ObjName ADDITIVE 
+   INDEX ON cRecType   TAG RecType ADDITIVE 
+   
+   USE IN (SELECT("CoreMeta"))
+   
+   SELECT (lnOldSelect)
+
+CATCH TO loException
+   llReturnVal = .F.
+   
+ENDTRY
+
+RETURN llReturnVal
+
+
+********************************************************************************
+*  METHOD NAME: GetTypeCount
+*
+*  AUTHOR: Richard A. Schummer, February 2016
+*
+*  METHOD DESCRIPTION:
+*    This method returns the count of detail records found in the SDT Metadata.
+*    This could be something like the number of tables registered in SDT, or the 
+*    number of indexes in for a table, or the number of fields in a table.
+*
+*  INPUT PARAMETERS:
+*    tcDBCName   = character, required, name of the DBC queried in SDT Metadata
+*    tcObjectNam = character, required, name of the object queried in SDT Metadata 
+*    tcRecType   = character, required, name of the record type queried in SDT Metadata
+* 
+*  OUTPUT PARAMETERS:
+*    luReturnVal = normally an integer, but NULL if something is not there to be
+*                  counted, especially in the case where CoreMeta does not exist.
+* 
+********************************************************************************
+PROCEDURE GetTypeCount(tcDBCName, tcObjectNam, tcRecType)
+
+LOCAL luReturnVal, ;
+      lnOldSelect
+
+luReturnVal = NULL
+
+TRY 
+   lnOldSelect = SELECT()
+
+   SELECT * ;
+      FROM curDBCXCoreMeta ;
+      WHERE cDBCName = tcDBCName ;
+        AND cObjectNam = tcObjectNam ;
+        AND cRecType = tcRecType ;
+      INTO CURSOR curObjects 
+
+   luReturnVal = RECCOUNT("curObjects")
+
+   USE IN (SELECT("curObjects"))
+   
+   SELECT (lnOldSelect)
+
+
+CATCH TO loException
+   luReturnVal = NULL
+
+ENDTRY
+
+RETURN luReturnVal
+
+
+********************************************************************************
+*  METHOD NAME: CloseData
+*
+*  AUTHOR: Richard A. Schummer, February 2016
+*
+*  METHOD DESCRIPTION:
+*    This method is called to close any open cursors for the process.
+*
+*  INPUT PARAMETERS:
+*    None
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE CloseData()
+
+USE IN (SELECT("curDBCXCoreMeta"))
+
+RETURN 
 
 *: EOF :* 

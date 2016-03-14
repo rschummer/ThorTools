@@ -447,7 +447,9 @@ RETURN
 *
 *  METHOD DESCRIPTION:
 *     This method opens the specified table and tests its contents for memo 
-*     corruption by opening the table and scanning the records.
+*     corruption by opening the table, scanning the records, and 
+*     scattering the memo to an object. If the scatter fails, then the memo 
+*     is considered corrupt.
 *
 *  INPUT PARAMETERS:
 *    tcTablePath = character, required, the name of the table and path to open it.
@@ -620,7 +622,7 @@ IF m.llOK = .T.
       ? "Memo file is clean!"
 
    CATCH TO loException
-      ? "**Error: " + PADR(TRANSFORM(loError.ErrorNo),10) + PADR(loError.Message, 50)
+      ? "**Error: " + PADR(TRANSFORM(loException.ErrorNo),10) + PADR(loException.Message, 50)
       m.llErrorFound = .T.
 
    ENDTRY
