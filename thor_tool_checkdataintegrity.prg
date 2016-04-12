@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, November 2013
 *
-*  COPYRIGHT © 2013-2015   All Rights Reserved.
+*  COPYRIGHT © 2013-2016   All Rights Reserved.
 *     White Light Computing, Inc.
 *     Rick Schummer
 *     PO Box 391
@@ -77,6 +77,9 @@
 * ----------------------------------------------------------------------------------------
 * 09/20/2015  Richard A. Schummer     2.2      Updated Thor registration information and 
 *                                              general code cleanup
+* ----------------------------------------------------------------------------------------
+* 02/20/2016  Richard A. Schummer     2.2      Added index tag check, record count and 
+*                                              empty table notation to the log.
 * ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************

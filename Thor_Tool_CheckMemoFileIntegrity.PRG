@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, March 2015
 *
-*  COPYRIGHT © 2015   All Rights Reserved.
+*  COPYRIGHT © 2015-2015   All Rights Reserved.
 *     White Light Computing, Inc.
 *     Rick Schummer
 *     PO Box 391
@@ -92,6 +92,9 @@
 * ----------------------------------------------------------------------------------------
 * 09/20/2015  Richard A. Schummer     1.1      Updated Thor registration information and 
 *                                              general code cleanup
+* ----------------------------------------------------------------------------------------
+* 04/12/2016  Richard A. Schummer     1.2      Fixed bug when running folder of DBFs
+*                                              with undeclared variable not set 
 * ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
@@ -185,6 +188,7 @@ LOCAL lcCode, ;
       llMemoFile, ;
       lnDBCFiles, ;
       lnFilesInFolder, ;
+      lcFolderForFiles, ;
       lnI, ;
       lnJ, ;
       lnOldMemoWidth, ;
@@ -253,7 +257,8 @@ TRY
       * ===============================================================
       * Lastly, get list of all DBFs in folder and work with that list
       OTHERWISE
-         lnFilesInFolder = ADIR(laFiles, "*.DBF")
+         lnFilesInFolder  = ADIR(laFiles, "*.DBF")
+         lcFolderForFiles = FULLPATH(CURDIR())
          
          IF lnFilesInFolder = 0
             lnTables = 0               
