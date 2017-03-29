@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, April 2001
 *
-*  COPYRIGHT © 2001-2015   All Rights Reserved.
+*  COPYRIGHT © 2001-2016   All Rights Reserved.
 *     Richard A. Schummer
 *     White Light Computing, Inc.
 *     PO Box 391
@@ -154,6 +154,16 @@
 * 09/20/2015  Richard A. Schummer     3.2      Updated Thor registration information and 
 *                                              general code cleanup
 * ----------------------------------------------------------------------------------------
+* 07/08/2016  Richard A. Schummer     3.3      Added new "AutoOpenProject" text file to 
+*                                              force SetPath to open specific file. The use
+*                                              case is project folder that has several 
+*                                              non-important or test projects that force
+*                                              open dialog to pick from each time. See 
+*                                              constant ccAutoOpenProject to change name.
+*                                              If you don't want this, just skip creating
+*                                              the text file. Content of the file should 
+*                                              be the project you want opened automatically.
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS txParam1
@@ -170,6 +180,9 @@ LPARAMETERS txParam1
 #DEFINE ccSHOWPATHSFONTNAME      "Segoe UI"
 #DEFINE ccSHOWPATHSFONTSTYLE     "N"
 #DEFINE ccROOTPROJECTFOLDER      [J:\WLCProject]
+
+* Default auto opening text file to tell tool which project to open
+#DEFINE ccAutoOpenProject        "wlcAutoOpenProject.txt"
 
 * Extension class called at the end of the process
 #DEFINE ccDEVHOOKPROGBASE        [RAS]
@@ -245,6 +258,7 @@ RETURN
 * 
 ********************************************************************************
 PROCEDURE ToolCode(tcProjectName)
+LOCAL lcAutoOpenFound
 
 * Need these variables to survive the RELEASE ALL EXCEPT
 PUBLIC gnProjectFilesAvailable, ;
@@ -297,16 +311,34 @@ ELSE
    IF m.glOpenAlready
       * No more selection of the project, continue on...
    ELSE
-      gnProjectFilesAvailable = ADIR(laPjx, "*.pjx")
+      lcAutoOpenFound = .F.
    
-      IF m.gnProjectFilesAvailable = 1
-         tcProjectName = laPjx[1,1]
-      ELSE
-         tcProjectName = GETFILE("PJX", "Pick the project")
+      IF FILE(ccAutoOpenProject)
+         tcProjectName = FILETOSTR(ccAutoOpenProject)
+         tcProjectName = STRTRAN(m.tcProjectName, CHR(13), SPACE(0))
+         tcProjectName = STRTRAN(m.tcProjectName, CHR(10), SPACE(0))
+         tcProjectName = FORCEEXT(m.tcProjectName, "pjx")
+         
+         IF FILE(m.tcProjectName)
+            lcAutoOpenFound = .T.
+            WAIT WINDOW "Using Auto Open Project file to determine the project to open..." NOWAIT 
+         ELSE
+            tcProjectName = SPACE(0)
+         ENDIF 
+      ENDIF 
+      
+      IF m.lcAutoOpenFound = .F.
+         gnProjectFilesAvailable = ADIR(laPjx, "*.pjx")
+      
+         IF m.gnProjectFilesAvailable = 1
+            tcProjectName = laPjx[1,1]
+         ELSE
+            tcProjectName = GETFILE("PJX", "Pick the project")
+         ENDIF 
       ENDIF 
    ENDIF 
    
-   IF EMPTY(tcProjectName)
+   IF EMPTY(m.tcProjectName)
       RETURN 
    ENDIF 
 ENDIF
@@ -368,10 +400,10 @@ lnStartSeconds        = 0
 lnEndSeconds          = 0
 
 * If the permanent set path log file does not exist, initialize it to nothing.
-IF FILE(gcSetPathPermErrorLogFile)
+IF FILE(m.gcSetPathPermErrorLogFile)
    * Nothing to do 
 ELSE
-   STRTOFILE(SPACE(0), gcSetPathPermErrorLogFile)
+   STRTOFILE(SPACE(0), m.gcSetPathPermErrorLogFile)
 ENDIF 
 
 * Start the path setting with non-project tool and add-on directories
@@ -448,7 +480,7 @@ TRY
                " in " + m.loException.Procedure + ;
                " on " + TRANSFORM(m.loException.LineNo)
 
-      MESSAGEBOX(lcCode, ;
+      MESSAGEBOX(m.lcCode, ;
                  0+48, ;
                  _screen.Caption)
     
@@ -476,7 +508,7 @@ TRY
                " in " + m.loException.Procedure + ;
                " on " + TRANSFORM(m.loException.LineNo)
 
-      MESSAGEBOX(lcCode, ;
+      MESSAGEBOX(m.lcCode, ;
                  0+48, ;
                  _screen.Caption)
     
@@ -517,7 +549,7 @@ TRY
       
       SCAN
          lcNewPath = ALLTRIM(curFolders.cFolder)
-         IF NOT EMPTY(lcNewPath) AND (NOT (";" + lcNewPath) $ m.lcPath)
+         IF NOT EMPTY(m.lcNewPath) AND (NOT (";" + m.lcNewPath) $ m.lcPath)
             lcPath = ALLTRIM(m.lcPath) + ";" + m.lcNewPath
          ENDIF
       ENDSCAN

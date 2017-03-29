@@ -81,6 +81,10 @@
 * 02/20/2016  Richard A. Schummer     2.2      Added index tag check, record count and 
 *                                              empty table notation to the log.
 * ----------------------------------------------------------------------------------------
+* 08/19/2016  Richard A. Schummer     2.3      Fixed message when FREE table name cannot
+*                                              be opened, previously did not display 
+*                                              correct alias of the free table
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS lxParam1
@@ -107,7 +111,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(lxParam1) AND 'thorinfo' == LOWER(lxParam1.Cla
       .Sort          = 0                          && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 2.2, September 20, 2015"           && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 2.3, August 19, 2016"              && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"    && link to a page for this tool
       .VideoLink     = SPACE(0)                                    && link to a video for this tool
@@ -347,8 +351,8 @@ TRY
                lnFailedFree  = m.lnFailedFree + 1 
                lcLogText     = m.lcLogText + ;
                                ccCRLF + ;
-                               PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
-                               ALLTRIM(laTables[lnI]) + SPACE(1) + ccFAILEDMSG + ;
+                               PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnFreeTables)), "0") + ")  " + ;
+                               ALLTRIM(m.lcFreeTable) + SPACE(1) + ccFAILEDMSG + ;
                                m.loException.Message + ;
                                " on line " + TRANSFORM(m.loException.LineNo) + ;
                                ccCRLF + ccCRLF
