@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, January 2015
 *
-*  COPYRIGHT © 2015   All Rights Reserved.
+*  COPYRIGHT © 2015-2017   All Rights Reserved.
 *     White Light Computing, Inc.
 *     Rick Schummer
 *     PO Box 391
@@ -102,8 +102,12 @@
 * ----------------------------------------------------------------------------------------
 * 02/07/2015  Richard A. Schummer     1.1      Clean up of the code and more testing
 * ----------------------------------------------------------------------------------------
-* 09/20/2015  Richard A. Schummer     2.2      Updated Thor registration information and 
+* 09/20/2015  Richard A. Schummer     1.2      Updated Thor registration information and 
 *                                              general code cleanup
+* ----------------------------------------------------------------------------------------
+* 06/20/2017  Richard A. Schummer     1.3      Refectored index tag warnings, and added a
+*                                              check on STR() to see if length parameter
+*                                              passed.
 * ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
@@ -145,7 +149,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(lxParam1) AND 'thorinfo' == LOWER(lxParam1.Cla
       .Sort          = 0                          && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 1.2, September 20, 2015"          && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 1.3, June 20, 2017"               && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"   && link to a page for this tool
       .VideoLink     = SPACE(0)                                   && link to a video for this tool
@@ -869,33 +873,55 @@ IF m.llOK = .T.
       llWarningRecorded = .F.
 
       IF "DTOC(" $ m.lcIndexExpr + m.lcForExpr
-         ? "Tag:", m.lcTagName, " with Expr: [" + ALLTRIM(m.lcIndexExpr) + "] ", "WARNING: This index uses the function DTOC(), problem depending on SET CENTURY"
+         LogTagExpressionDetails(m.lcTagName, m.lcIndexExpr, m.lcForExpr)
+         ?? "WARNING: This index uses the function DTOC(), problem depending on SET CENTURY"
          llWarningRecorded = .T.
-         *< RAS 31-Jan-2015, removed as it is logged, no need to stop process
-         *< READ
       ENDIF
 
       * RAS 31-Jan-2015, added additional check for variable sized indexes
       IF "ALLTRIM(" $ m.lcIndexExpr + m.lcForExpr OR "ALLT(" $ m.lcIndexExpr + m.lcForExpr
-         ? "Tag:", m.lcTagName, " with Expr: [" + ALLTRIM(m.lcIndexExpr) + "] ", "WARNING: This index uses the function ALLTRIM(), make sure padded to fix length"
+         LogTagExpressionDetails(m.lcTagName, m.lcIndexExpr, m.lcForExpr)
+         ?? "WARNING: This index uses the function ALLTRIM(), make sure padded to fix length"
          llWarningRecorded = .T.
       ENDIF
 
       * RAS 31-Jan-2015, added additional check for variable sized indexes
       IF "RTRIM(" $ m.lcIndexExpr + m.lcForExpr OR "RTRI(" $ m.lcIndexExpr + m.lcForExpr
-         ? "Tag:", m.lcTagName, " with Expr: [" + ALLTRIM(m.lcIndexExpr) + "] ", "WARNING: This index uses the function RTRIM(), make sure padded to fix length"
+         LogTagExpressionDetails(m.lcTagName, m.lcIndexExpr, m.lcForExpr)
+         ?? "WARNING: This index uses the function RTRIM(), make sure padded to fix length"
          llWarningRecorded = .T.
       ENDIF
 
       * RAS 31-Jan-2015, added additional check for variable sized indexes
       IF "STR(" $ m.lcIndexExpr + m.lcForExpr 
-         ? "Tag:", m.lcTagName, " with Expr: [" + ALLTRIM(m.lcIndexExpr) + "] ", "WARNING: This index uses the function STR(), make sure it has second parameter to fix length"
+         LogTagExpressionDetails(m.lcTagName, m.lcIndexExpr, m.lcForExpr)
+
+         * RAS 20-Jun-2017, built in extra checks to see if STR() has second parameter so warnings are not recorded, but issue noted.
+         lcAdditionalChecks = SPACE(0)
+         
+         IF "STR(" $ m.lcIndexExpr
+            lcAdditionalChecks = m.lcAdditionalChecks + IIF(EMPTY(m.lcAdditionalChecks), SPACE(0), SPACE(2)) + ;
+                                 CheckStrFunctionLengthParam("Index Expression", m.lcIndexExpr)
+         ELSE
+            * Nothing to do
+         ENDIF
+
+         IF "STR(" $ m.lcForExpr
+            lcAdditionalChecks = m.lcAdditionalChecks + IIF(EMPTY(m.lcAdditionalChecks), SPACE(0), SPACE(2)) + ;
+                                 CheckStrFunctionLengthParam("Filter Expression", m.lcForExpr)
+         ELSE
+            * Nothing to do
+         ENDIF
+
+         ?? lcAdditionalChecks 
+
          llWarningRecorded = .T.
       ENDIF
 
       * RAS 4-Feb-2015, added additional check for FPD/FPW "UNIQUE" Tags
       IF UNIQUE("", m.i) = .T.
-         ? "Tag:", m.lcTagName, " with Expr: [" + ALLTRIM(m.lcIndexExpr) + "] ", "WARNING: This index uses obsolete UNIQUE clause, this does not guarantee uniqueness of column"
+         LogTagExpressionDetails(m.lcTagName, m.lcIndexExpr, m.lcForExpr)
+         ?? "WARNING: This index uses obsolete UNIQUE clause, this does not guarantee uniqueness of column"
          llWarningRecorded = .T.
       ENDIF
 
@@ -1522,6 +1548,129 @@ ELSE
 ENDIF
 
 RETURN m.lcFuncRtn
+
+
+********************************************************************************
+*  METHOD NAME: CheckStrFunctionLengthParam
+*
+*  AUTHOR: Richard A. Schummer, June 2017
+*
+*  METHOD DESCRIPTION:
+*    This method parses an index tag expression or filter (FOR) to see if there
+*    is a second parameter for the function call to make the expression a fixed length
+*    so we can warn the person evaluating the indexes for problems.
+*
+*  INPUT PARAMETERS:
+*    tcType = Type of expression that is being evaluated, used as a label.
+*    tcExpr = character, required, expression to be evaluated for the STR() function.
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE CheckStrFunctionLengthParam(tcType, tcExpr)
+
+LOCAL lcAdditionalChecks, ;
+      lcOKMsg, ;
+      lcBadMsg, ;
+      lcUnkMsg, ;
+      lnStart, ;
+      lcIndexExprStr, ;
+      lnBalancedCount, ;
+      lnI, ;
+      lnJ, ;
+      lnStrCommaPosition, ;
+      lnCloseParenPos
+
+lcAdditionalChecks = SPACE(0)
+
+IF "STR(" $ m.tcExpr
+   lcOKMsg            = SPACE(2) + m.tcType + " - OK: This index uses the function STR(), but it has second parameter for fixed length"
+   lcBadMsg           = SPACE(2) + m.tcType + " - WARNING: This index uses the function STR(), make sure it has 2nd parameter to fix length"
+   lcUnkMsg           = SPACE(2) + m.tcType + " - WARNING: This index uses the function STR(), and we could not determine 2nd parameter to fix length"
+
+   lnStart            = ATC("STR(", m.tcExpr) + 4
+   lcIndexExprStr     = SUBSTR(m.tcExpr, m.lnStart)
+   
+   * Scan the string for opening and closing parenthesis before comma for STR() function.
+   lnBalancedCount    = 0
+   
+   FOR lnI = 1 TO LENC(m.lcIndexExprStr)
+      IF m.lnBalancedCount = 0 AND SUBSTRC(m.lcIndexExprStr, m.lnI, 1) = ","
+         lnStrCommaPosition = m.lnI
+         EXIT 
+      ENDIF 
+      
+      DO CASE
+         CASE SUBSTRC(m.lcIndexExprStr, m.lnI, 1) = "("
+            lnBalancedCount = m.lnBalancedCount + 1 
+
+         CASE SUBSTRC(m.lcIndexExprStr, m.lnI, 1) = ")"
+            lnBalancedCount = m.lnBalancedCount - 1 
+
+         OTHERWISE
+            * Not an important character
+            
+      ENDCASE
+      
+   ENDFOR 
+
+   IF m.lnBalancedCount = 0
+      * Now check for a closing parenthesis to make sure it is legit closing.
+      lnCloseParenPos = NULL
+      
+      FOR lnJ = m.lnI TO LENC(m.lcIndexExprStr)
+         IF SUBSTRC(m.lcIndexExprStr, m.lnJ, 1) = ")"
+            lnCloseParenPos = m.lnJ
+         ENDIF 
+      ENDFOR 
+
+      * Make sure comma exists and is before the closing parenthesis
+      DO CASE
+         CASE ISNULL(m.lnCloseParenPos)
+            lcAdditionalChecks = m.lcAdditionalChecks + m.lcUnkMsg
+            
+         CASE m.lnStrCommaPosition > 0 AND (m.lnStrCommaPosition < m.lnCloseParenPos)
+            lcAdditionalChecks = m.lcAdditionalChecks + m.lcOKMsg
+
+         OTHERWISE
+            lcAdditionalChecks = m.lcAdditionalChecks + m.lcBadMsg
+            
+      ENDCASE
+   ELSE
+      lcAdditionalChecks = m.lcAdditionalChecks + m.lcUnkMsg 
+   ENDIF 
+ELSE
+   * No STR(), nothing to do.
+ENDIF
+
+RETURN m.lcAdditionalChecks 
+
+
+********************************************************************************
+*  METHOD NAME: LogTagExpressionDetails
+*
+*  AUTHOR: Richard A. Schummer, June 2017
+*
+*  METHOD DESCRIPTION:
+*    This method outputs the Tag expression and filter for expression to the 
+*    log file for the tag.
+*
+*  INPUT PARAMETERS:
+*    tcTagName   = character, required, name of the tag
+*    tcIndexExpr = character, required, tag expression
+*    tcForExpr   = character, required, filter expression
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE LogTagExpressionDetails(tcTagName, tcIndexExpr, tcForExpr)
+
+? "Tag:", m.tcTagName, " with Expr: [" + ALLTRIM(m.tcIndexExpr) + "] ", ;
+           IIF(EMPTY(m.tcForExpr), SPACE(0), "Filtered For: [" + m.tcForExpr + "] ")
+
+RETURN 
 
 
 ********************************************************************************
