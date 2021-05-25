@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, November 2013
 *
-*  COPYRIGHT © 2013-2016   All Rights Reserved.
+*  COPYRIGHT © 2013-2018   All Rights Reserved.
 *     White Light Computing, Inc.
 *     Rick Schummer
 *     PO Box 391
@@ -30,7 +30,13 @@
 *     and not the Licensor assume the entire cost of any service and repair.
 *
 *  PROGRAM DESCRIPTION:
-*     This program checks to see if the data in tables can be cleanly opened.
+*     This program checks to see if the data in tables can be cleanly opened. If successful to open
+*     the table, it provides lots of interesting details:
+*         - Date/time of the file
+*         - Tags count (and comparison to counts in DBCX metadata if it exists)
+*         - Record counts
+*         - Notice if the table is empty
+*         - Details of tables closing in on 2GB limits if approaching
 *
 *  CALLING SYNTAX:
 *     DO Thor_Tool_CheckDataIntegrity.prg
@@ -85,9 +91,37 @@
 *                                              be opened, previously did not display 
 *                                              correct alias of the free table
 * ----------------------------------------------------------------------------------------
+* 10/14/2017  Richard A. Schummer     2.4      SET TABLEPROMPT OFF logic
+* ----------------------------------------------------------------------------------------
+* 02/06/2018  Richard A. Schummer     3.0      Index tag issue check for free tables  
+*                                              (only was doing DBC tables), message to show
+*                                              tag on its own line (more obvious),  
+*                                              lowercased path and file names, added 
+*                                              warnings that file sizes getting near 2GB 
+*                                              limit. See setting percent using constant
+*                                              cnHOWCLOSETOLIMIT default to 80%. Fixed issue
+*                                              with tables already opening not opening again
+*                                              giving false positive on potential problem.
+* ----------------------------------------------------------------------------------------
+* 05/01/2018  Richard A. Schummer     3.1      Added table file date/time, sorted free
+*                                              tables alphabetically like contained tables.
+*                                              Free table alias upper case like contained
+*                                              tables, and path/file name lower cased like
+*                                              contained tables. Optionally display DBCX
+*                                              Caption for the table if DBCX metadata is
+*                                              present and developer filled them in. See 
+*                                              clSHOW_DBCX_CAPTION to toggle on or off. 
+* ----------------------------------------------------------------------------------------
+* 08/02/2020  Richard A. Schummer     3.3      Added table DBC file sizes for all three 
+*                                              files. Added date/time stamp to the log
+*                                              file name for situations where you might 
+*                                              need to compare before and after file repairs.
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS lxParam1
+
+#DEFINE ccTOOLNAME    "WLC DBC/DBF/FPT/SDT Integrity Checker"
 
 * Standard prefix for all tools for Thor, allowing this tool to tell Thor about itself.
 
@@ -111,7 +145,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(lxParam1) AND 'thorinfo' == LOWER(lxParam1.Cla
       .Sort          = 0                          && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 2.3, August 19, 2016"              && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 3.1, May 1, 2018"                  && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"    && link to a page for this tool
       .VideoLink     = SPACE(0)                                    && link to a video for this tool
@@ -148,8 +182,14 @@ RETURN
 PROCEDURE ToolCode
 
 #DEFINE ccCRLF                 CHR(13)+CHR(10)
-#DEFINE ccLOGFILE              "DBCIntegrityCheckLog.txt"
+#DEFINE ccSPACEGAP             SPACE(5)
+#DEFINE ccLOGFILEBASE          "DBCIntegrityCheckLog"
 #DEFINE ccDBCVALIDATEFILE      "DBCValidate.txt"
+#DEFINE cnTWOGIGLIMIT          (2*1024*1024*1024) -1
+#DEFINE cnHOWCLOSETOLIMIT      .800000
+#DEFINE clFILESIZEWARNINGS     .T.
+#DEFINE ccFILESPECSTYLE        "SHORT"
+#DEFINE clSHOW_DBCX_CAPTION    .F.
 
 * Internationalization opportunities
 #DEFINE ccRECORDSLITERAL       "Records"
@@ -157,7 +197,7 @@ PROCEDURE ToolCode
 #DEFINE ccSUCCESSMSG           "successfully opened..."
 #DEFINE ccFAILEDMSG            " ************** FAILED..."
 #DEFINE ccEMPTYTABLELITERAL    "EMPTY TABLE"
-#DEFINE ccBADINDEXCOUNTLITERAL "BAD TAG COUNT"
+#DEFINE ccBADINDEXCOUNTLITERAL "** ERROR: bad tag count"
 
 LOCAL loException as Exception,;
       lcLogText , ;
@@ -173,14 +213,25 @@ LOCAL loException as Exception,;
       lnI, ;
       lnOpenedFree, ;
       lnTables, ;
-      lnTags
+      lnTags, ;
+      llFileSizeWarnings, ;
+      ldFileTimeStamp , ;
+      lcFileTimeStamp, ;
+      lcOldCompatible
+
+* Setting if you want the file size percentage warnings.
+llFileSizeWarnings = clFILESIZEWARNINGS
 
 lcOldSafety = SET("Safety")
 SET SAFETY OFF
 
+lcOldTablePrompt = SET("TablePrompt")
+SET TABLEPROMPT OFF 
+
 CD ?
 
-lcLogText = TRANSFORM(DATETIME()) + ccCRLF
+lcLogText = ccTOOLNAME + ccCRLF + ;
+            TRANSFORM(DATETIME()) + ccCRLF
 
 TRY
    CloseData()
@@ -192,20 +243,37 @@ TRY
    ELSE
       lcDBCFile = GETFILE("dbc")
    ENDIF 
+   
+   lcDBCFile = ALLTRIM(m.lcDBCFile)
  
-   IF EMPTY(lcDBCFile)
+   IF EMPTY(m.lcDBCFile)
       * Nothing to do
    ELSE
       WAIT WINDOW "Building temporary cursor of DBCX Metadata..." NOWAIT 
       CollectDBCXMetadata()
 
+      * Open database
       WAIT WINDOW "Opening database, please wait..." NOWAIT 
       OPEN DATABASE (m.lcDBCFile) SHARED 
       SET DATABASE TO (JUSTSTEM(m.lcDBCFile))
       
+      * RAS 02-Aug-2020, add file sizes of the three files to the log file.
+      lcOldCompatible = SET("Compatible")
+      SET COMPATIBLE ON
+      
+      lnDBCFileSize = FSIZE(m.lcDBCFile)
+      lnDCXFileSize = FSIZE(FORCEEXT(m.lcDBCFile, "DCX"))      
+      lnDCTFileSize = FSIZE(FORCEEXT(m.lcDBCFile, "DCT")) 
+      
+      SET COMPATIBLE &lcOldCompatible     
+      
       lcLogText = m.lcLogText + ;
                   "DBC: " + LOWER(FULLPATH(DBC())) + ccCRLF + ;
-                  "Current Folder: " + FULLPATH(CURDIR()) + ccCRLF + ccCRLF
+                  "Current Folder: " + FULLPATH(CURDIR()) + ccCRLF + ccCRLF + ;
+                  "DBC file size: " + ALLTRIM(TRANSFORM(m.lnDBCFileSize, "999,999,999,999")) + ccCRLF + ;
+                  "DCX file size: " + ALLTRIM(TRANSFORM(m.lnDCXFileSize, "999,999,999,999")) + ccCRLF + ;
+                  "DCT file size: " + ALLTRIM(TRANSFORM(m.lnDCTFileSize, "999,999,999,999")) + ;
+                  ccCRLF + ccCRLF
       
       WAIT WINDOW "Determining number of tables to analyze" NOWAIT            
       lnTables  = ADBOBJECTS(laTables, "TABLE")
@@ -216,6 +284,7 @@ TRY
       
       WAIT WINDOW "Validating database, please wait..." NOWAIT
       
+      * Database container validation
       VALIDATE DATABASE NOCONSOLE TO FILE (ccDBCVALIDATEFILE)
       
       lcLogText = m.lcLogText + ;
@@ -224,6 +293,7 @@ TRY
       
       DELETE FILE (ccDBCVALIDATEFILE) RECYCLE 
 
+      * Check DBC tables
       lnOpened = 0
       lnFailed = 0
       
@@ -232,20 +302,53 @@ TRY
          
          lnI = 1
 
+         * Loop through all the tables
          DO WHILE m.lnI <= m.lnTables 
-         
             TRY
-               lcAlias = JUSTSTEM(laTables[lnI])
+               lcAlias       = JUSTSTEM(laTables[lnI])
+               laTables[lnI] = ALLTRIM(laTables[lnI])
                
                WAIT WINDOW LOWER(laTables[lnI]) + " - " + TRANSFORM((m.lnI/m.lnTables)*100) + "%" NOWAIT 
                
-               USE (laTables[lnI]) SHARED AGAIN IN 0 NOUPDATE 
+               * Close this table just in case it is already open
+               USE IN (SELECT(ALLTRIM(laTables[lnI])))
+               
+               * Attempt to open the table, using DBC!LongFileName provided by ADBOBJECTS()
+               USE (m.lcDBCFile + "!" + laTables[lnI]) SHARED AGAIN IN 0 NOUPDATE 
                lnOpened  = m.lnOpened + 1 
+               
+               * Collect the DBCX Caption if using DBCX metadata
+               IF clSHOW_DBCX_CAPTION
+                  lcDBCXCap = GetDBCXMetaCaption(m.lcDBCFile, laTables[lnI])
+               ELSE
+                  lcDBCXCap = NULL
+               ENDIF 
+               
+               IF ISNULL(m.lcDBCXCap)
+                  * Nothing to do
+               ELSE
+                  lcDBCXCap = ALLTRIM(m.lcDBCXCap)
+               ENDIF 
+               
+               * Log the table specifics...
                lcLogText = m.lcLogText + ;
                            PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
-                           ALLTRIM(laTables[lnI]) + SPACE(1) + ccSUCCESSMSG + ;
-                           FULLPATH(DBF(laTables[lnI])) 
+                           laTables[lnI] + ;
+                           IIF(ISNULL(m.lcDBCXCap) OR EMPTY(m.lcDBCXCap), SPACE(0), " [" + m.lcDBCXCap + "]") + ;
+                           SPACE(1) + ccSUCCESSMSG + ;
+                           " (" + ;
+                           LOWER(FULLPATH(DBF(laTables[lnI]))) + ;
+                           ")" 
 
+               * Get the date/time for the table.
+               ldFileTimeStamp = FDATE(DBF(laTables[lnI]), 1)
+               lcFileTimeStamp = TRANSFORM(m.ldFileTimeStamp)
+
+               lcLogText = m.lcLogText + ;
+                           " {" + m.lcFileTimeStamp + "} "
+
+               * See if there are issues with tags missing
+               * First, see what is live in the table
                lnTags    = ATAGINFO(laTags, SPACE(0), m.lcAlias)
 
                lcLogText = m.lcLogText + ;
@@ -254,30 +357,49 @@ TRY
                            TRANSFORM(m.lnTags) + SPACE(1) + ccTAGSLITERAL
 
                lcLogText = m.lcLogText + ;
-                           IIF(RECCOUNT(m.lcAlias) = 0, SPACE(3) + "** " + ccEMPTYTABLELITERAL + " **", "")
+                           IIF(RECCOUNT(m.lcAlias) = 0, ccSPACEGAP + ccEMPTYTABLELITERAL, "")
                
+               * Second, see how many tags are in the Stonefield Database Toolkit / DBCX metadata
                lnCoreMetaTags = GetTypeCount(LOWER(JUSTSTEM(m.lcDBCFile)), LOWER(m.lcAlias) + ".", "I")
                
                IF ISNULL(m.lnCoreMetaTags)
-                  * Nothing to report for the index tags
+                  * Nothing to report for the index tags because no DBCX metadata
                ELSE
                   IF m.lnTags # m.lnCoreMetaTags
                      lcLogText = m.lcLogText + ;
-                                 SPACE(3) + ; 
-                                 "** " + ccBADINDEXCOUNTLITERAL + " ** - " + ;
+                                 ccCRLF + ccSPACEGAP + ; 
+                                 "- " + ccBADINDEXCOUNTLITERAL + " - " + ;
                                  TRANSFORM(m.lnTags) + " table tags and " + ;
-                                 TRANSFORM(m.lnCoreMetaTags) + " metadata tags"
+                                 TRANSFORM(m.lnCoreMetaTags) + " metadata tags" 
                   ENDIF 
                ENDIF 
 
+               * Display file size details and determine if there are issues with file sizes
+               DO CASE
+                  * Only show if there are problems with the file size getting to percentage of limit
+                  CASE UPPER(ccFILESPECSTYLE) = "SHORT"              
+                     lcLogText = m.lcLogText + ;
+                                 FileSpecificationsShort(m.lcAlias, .T.)
+
+                  * Show regardless if there are problems
+                  CASE UPPER(ccFILESPECSTYLE) = "LONG"
+                     lcLogText = m.lcLogText + ;
+                                 FileSpecificationsLong(m.lcAlias)
+
+                  OTHERWISE
+                     * No file specifications
+                     
+               ENDCASE
+
+
                lcLogText = m.lcLogText + ccCRLF
 
+               * Close this table and move on to the next one
                USE IN (SELECT(laTables[lnI]))
                
                *? Potential optional future enhancements for the process:
                *?  - Scan tables
                *?  - Read memo
-               *?  - Incorporate details from Index Integrity tool like how close table is to 2 GB limit
                
             CATCH TO loException   
                lnFailed  = m.lnFailed + 1 
@@ -293,7 +415,7 @@ TRY
          ENDDO
       ENDIF 
       
-      * Check free tables.
+      * Check free tables, but only if we know which ones via Stonefield Database Toolkit / DBCX metadata.
       lnOpenedFree = 0
       lnFailedFree = 0
 
@@ -302,6 +424,7 @@ TRY
             FROM coremeta ;
             WHERE EMPTY(cDBCName) ;
               AND cRecType = "T" ;
+            ORDER BY cObjectNam ;
             INTO CURSOR curFreetables
          
          IF USED("curFreetables")
@@ -315,20 +438,49 @@ TRY
          
          lnI = 1
          
+         * Loop through all the tables
          DO WHILE m.lnI <= m.lnFreeTables 
             TRY
                lcFreeTable = ALLTRIM(curFreetables.cObjectNam)
-               lcFreeAlias = JUSTSTEM(lcFreeTable)
+               lcFreeAlias = JUSTSTEM(m.lcFreeTable)
                
                WAIT WINDOW LOWER(m.lcFreeTable) + " - " + TRANSFORM((m.lnI/m.lnFreeTables)*100) + "%" NOWAIT 
                
+               * Close this table just in case it is already open
+               USE IN (SELECT(m.lcFreeTable))
+               
+               * Attempt to open the table
                USE (m.lcFreeTable) SHARED AGAIN IN 0 NOUPDATE 
                lnOpenedFree = m.lnOpenedFree + 1 
+
+               * Collect the DBCX Caption if using DBCX metadata
+               lcDBCXCap = GetDBCXMetaCaption(SPACE(0), m.lcFreeTable)
+               
+               IF ISNULL(m.lcDBCXCap)
+                  * Nothing to do
+               ELSE
+                  lcDBCXCap = ALLTRIM(m.lcDBCXCap)
+               ENDIF 
+               
+               * Log the table specifics...
                lcLogText    = m.lcLogText + ;
                               PADL(TRANSFORM(m.lnI), LENC(TRANSFORM(m.lnFreeTables)), "0") + ")  " + ;
-                              ALLTRIM(m.lcFreeTable) + SPACE(1) + ccSUCCESSMSG + ;
-                              FULLPATH(DBF(m.lcFreeTable)) 
+                              UPPER(ALLTRIM(m.lcFreeTable)) +  ;
+                              IIF(ISNULL(m.lcDBCXCap) OR EMPTY(m.lcDBCXCap), SPACE(0), " [" + m.lcDBCXCap + "]") + ;
+                              SPACE(1) + ccSUCCESSMSG + ;
+                              "(" + ;
+                              LOWER(FULLPATH(DBF(m.lcFreeTable))) + ;
+                              ")" 
 
+               * Get the date/time for the table.
+               ldFileTimeStamp = FDATE(DBF(m.lcFreeTable), 1)
+               lcFileTimeStamp = TRANSFORM(m.ldFileTimeStamp)
+
+               lcLogText = m.lcLogText + ;
+                           " {" + m.lcFileTimeStamp + "} "
+
+               * See if there are issues with tags missing
+               * First, see what is live in the table
                lnTags    = ATAGINFO(laTags, SPACE(0), lcFreeTable)
 
                lcLogText = m.lcLogText + ;
@@ -337,12 +489,45 @@ TRY
                            TRANSFORM(lnTags) + SPACE(1) + ccTAGSLITERAL
 
                lcLogText = m.lcLogText + ;
-                           IIF(RECCOUNT(lcFreeTable) = 0, "** " + ccEMPTYTABLELITERAL + " **", "")
+                           IIF(RECCOUNT(lcFreeTable) = 0, ccSPACEGAP + ccEMPTYTABLELITERAL, "")
+
+               * Second, see how many tags are in the Stonefield Database Toolkit / DBCX metadata
+               lnCoreMetaTags = GetTypeCount(SPACE(0), LOWER(m.lcFreeAlias) + ".", "I")
+               
+               IF ISNULL(m.lnCoreMetaTags)
+                  * Nothing to report for the index tags because no DBCX metadata
+               ELSE
+                  IF m.lnTags # m.lnCoreMetaTags
+                     lcLogText = m.lcLogText + ;
+                                 ccCRLF + ccSPACEGAP + ; 
+                                 "- " + ccBADINDEXCOUNTLITERAL + " - " + ;
+                                 TRANSFORM(m.lnTags) + " table tags and " + ;
+                                 TRANSFORM(m.lnCoreMetaTags) + " metadata tags"
+                  ENDIF 
+               ENDIF 
+
+               * Display file size details and determine if there are issues with file sizes
+               DO CASE
+                  * Only show if there are problems with the file size getting to percentage of limit
+                  CASE UPPER(ccFILESPECSTYLE) = "SHORT"              
+                     lcLogText = m.lcLogText + ;
+                                 FileSpecificationsShort(m.lcFreeTable, .T.)
+
+                  * Show regardless if there are problems
+                  CASE UPPER(ccFILESPECSTYLE) = "LONG"
+                     lcLogText = m.lcLogText + ;
+                                 FileSpecificationsLong(m.lcFreeTable)
+
+                  OTHERWISE
+                     * No file specifications
+                     
+               ENDCASE
+
+               * Close this table and move on to the next one
+               USE IN (SELECT(m.lcFreeTable))
 
                lcLogText = m.lcLogText + ccCRLF
-               
-               USE IN (SELECT(m.lcFreeTable))
-               
+
                *? Potential optional future enhancements for the process:
                *?  - Scan tables
                *?  - Read memo
@@ -375,10 +560,13 @@ TRY
                   TRANSFORM(m.lnOpenedFree) + " free table(s) opened successfully" + ccCRLF + ;
                   TRANSFORM(m.lnFailedFree) + " free table(s) failed miserably" + ccCRLF + ;
                   ccCRLF + ;
-                  "DBC Integrity Check is complete: " + TRANSFORM(DATETIME())
+                  ccTOOLNAME + " is complete: " + TRANSFORM(DATETIME())
       
-      STRTOFILE(m.lcLogText, ccLOGFILE, 0)
-      MODIFY FILE (ccLOGFILE) NOEDIT RANGE 1,1 NOWAIT 
+      * RAS 02-Aug-2020, Added the datetime stamp to log file
+      lcLogFile = FORCEEXT(ccLOGFILEBASE + "_" + TTOC(DATETIME(), 1), "txt")
+      
+      STRTOFILE(m.lcLogText, m.lcLogFile, 0)
+      MODIFY FILE (m.lcLogFile) NOEDIT RANGE 1,1 NOWAIT 
 
       CLOSE DATABASES 
    ENDIF 
@@ -397,6 +585,8 @@ CATCH TO loException
 ENDTRY
 
 SET SAFETY &lcOldSafety
+SET TABLEPROMPT &lcOldTablePrompt 
+
 
 CLOSE DATABASES ALL 
 
@@ -449,7 +639,55 @@ CATCH TO loException
    
 ENDTRY
 
-RETURN llReturnVal
+RETURN m.llReturnVal
+
+
+********************************************************************************
+*  METHOD NAME: GetDBCXMetaCaption
+*
+*  AUTHOR: Richard A. Schummer, May 2018
+*
+*  METHOD DESCRIPTION:
+*    This method returns the DBCX Caption for the table.
+*
+*  INPUT PARAMETERS:
+*    tcDatabase   = required, character, can be left empty for free tables, this
+*                   is the database name.
+*    tcObjectName = required, character, cannot be empty, name of the free table
+*                   to get the DBCX caption.
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE GetDBCXMetaCaption(tcDatabase, tcObjectName)
+
+IF PCOUNT() = 2
+   IF FILE("coremeta.DBF")
+      tcDatabase   = LOWER(JUSTSTEM(m.tcDatabase))
+      tcObjectName = LOWER(m.tcObjectName)
+   
+      SELECT * ;
+         FROM coremeta ;
+         WHERE cDBCName = m.tcDatabase ;
+           AND cObjectNam = m.tcObjectName ;
+           AND cRecType = "T" ;
+         ORDER BY cObjectNam ;
+         INTO CURSOR curMetaCaption
+      
+      IF _tally > 0
+         lcReturnVal = curMetaCaption.cCaption
+      ELSE
+         lcReturnVal = NULL
+      ENDIF 
+   ELSE
+      lcReturnVal = NULL
+   ENDIF 
+ELSE
+   lcReturnVal = NULL
+ENDIF 
+
+RETURN m.lcReturnVal
 
 
 ********************************************************************************
@@ -487,6 +725,7 @@ TRY
       WHERE cDBCName = tcDBCName ;
         AND cObjectNam = tcObjectNam ;
         AND cRecType = tcRecType ;
+        AND NOT DELETED() ;
       INTO CURSOR curObjects 
 
    luReturnVal = RECCOUNT("curObjects")
@@ -501,7 +740,269 @@ CATCH TO loException
 
 ENDTRY
 
-RETURN luReturnVal
+RETURN m.luReturnVal
+
+
+
+********************************************************************************
+*  METHOD NAME: FileSpecificationsLong
+*
+*  AUTHOR: Richard A. Schummer, February 2015
+*
+*  METHOD DESCRIPTION:
+*    This method collects information about the DBF, CDX, and FPT as well as 
+*    details about a file size warning if files are closing in on 2GB limit.
+*
+*  INPUT PARAMETERS:
+*    tcAlias = character, required, alias of table to be analyzed.
+*    tlWarningOnly = logical, true means include warning, otherwise skip it.
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE FileSpecificationsLong(tcAlias, tlFileSizeWarningOnly)
+
+LOCAL lcLogText, ;
+      lcOldCompatible, ;
+      lnDBFSize, ;
+      lnCDXSize, ;
+      lnFPTSize, ;
+      loException
+
+lcLogText = SPACE(0)
+
+* Record file sizes
+lcOldCompatible = SET("Compatible")
+SET COMPATIBLE ON 
+
+lnDBFSize = FSIZE(FORCEEXT(DBF(m.tcAlias), "dbf"))
+
+IF m.tlFileSizeWarningOnly
+   lcLogText = m.lcLogText + ccSPACEGAP + ;
+               "- DBF is " + ;
+               FileSizeWarningCheck(m.lnDBFSize) + ;
+               ccCRLF
+ELSE 
+   lcLogText = m.lcLogText + ccSPACEGAP + ;
+               "- DBF File Size: " + ;
+               ALLTRIM(TRANSFORM(m.lnDBFSize, "999,999,999,999")) + ;
+               SPACE(1) + ;
+               FileSizeWarningCheck(m.lnDBFSize) + ;
+               ccCRLF
+ENDIF 
+
+TRY 
+   lnCDXSize = FSIZE(FORCEEXT(DBF(m.tcAlias), "cdx"))
+
+   IF m.tlFileSizeWarningOnly
+      lcLogText = m.lcLogText + ccSPACEGAP + ;
+                  "- CDX is " + ;
+                  FileSizeWarningCheck(m.lnDBFSize) + ;
+                  ccCRLF
+   ELSE 
+      lcLogText = m.lcLogText + ccSPACEGAP + ;
+                  "- CDX File Size: " + ;
+                  ALLTRIM(TRANSFORM(m.lnCDXSize, "999,999,999,999")) + ;
+                  SPACE(1) + ;
+                  FileSizeWarningCheck(m.lnCDXSize) + ;
+                  ccCRLF
+   ENDIF 
+   
+CATCH TO loException
+   * Ignore, there is nothing to do if there is no file available
+   
+ENDTRY
+
+TRY
+   lnFPTSize = FSIZE(FORCEEXT(DBF(m.tcAlias), "fpt")) 
+
+   IF m.tlFileSizeWarningOnly
+      lcLogText = m.lcLogText + ccSPACEGAP + ;
+                  "- FPT is " + ;
+                  FileSizeWarningCheck(m.lnDBFSize) + ;
+                  ccCRLF
+   ELSE 
+      lcLogText = m.lcLogText + ccSPACEGAP + ;
+                  "- FPT File Size: " + ;
+                  ALLTRIM(TRANSFORM(m.lnFPTSize , "999,999,999,999")) + ;
+                  SPACE(1) + ;
+                  FileSizeWarningCheck(m.lnFPTSize) + ;
+                  ccCRLF
+   ENDIF 
+   
+CATCH TO loException      
+   * Ignore, there is nothing to do if there is no file available
+   
+ENDTRY
+
+SET COMPATIBLE &lcOldCompatible
+
+
+RETURN m.lcLogText
+
+
+********************************************************************************
+*  METHOD NAME: FileSpecificationsShort
+*
+*  AUTHOR: Richard A. Schummer, February 2018
+*
+*  METHOD DESCRIPTION:
+*    This method collects information about the DBF, CDX, and FPT as well as 
+*    details about a file size warning if files are closing in on 2GB limit.
+*
+*  INPUT PARAMETERS:
+*    tcAlias         = character, required, alias of table to be analyzed.
+*    tlOnlyIfProblem = logical, true means include warning only if reported, 
+*                      otherwise skip it.
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE FileSpecificationsShort(tcAlias, tlOnlyIfProblem)
+
+LOCAL lcLogText, ;
+      lcOldCompatible, ;
+      lnDBFSize, ;
+      lnCDXSize, ;
+      lnFPTSize, ;
+      loException
+
+lcLogText = SPACE(0)
+
+* Record file sizes
+lcOldCompatible = SET("Compatible")
+SET COMPATIBLE ON 
+
+lnDBFSize         = FSIZE(FORCEEXT(DBF(m.tcAlias), "dbf"))
+lcFileSizeWarning = FileSizeWarningCheck(m.lnDBFSize)
+
+IF EMPTY(lcFileSizeWarning) AND m.tlOnlyIfProblem 
+   * Nothing to print
+ELSE 
+   IF NOT EMPTY(lcFileSizeWarning)
+      lcLogText = m.lcLogText + ;
+                  ccCRLF + ccSPACEGAP + ;
+                  "- DBF: " + ;
+                  ALLTRIM(TRANSFORM(m.lnDBFSize, "999,999,999,999")) + ;
+                  SPACE(1) + ;
+                  lcFileSizeWarning
+   ENDIF 
+ENDIF 
+
+TRY 
+   lnCDXSize         = FSIZE(FORCEEXT(DBF(m.tcAlias), "cdx"))
+   lcFileSizeWarning = FileSizeWarningCheck(m.lnCDXSize)
+
+   IF EMPTY(lcFileSizeWarning) AND m.tlOnlyIfProblem 
+      * Nothing to print
+   ELSE 
+      IF NOT EMPTY(lcFileSizeWarning)
+         lcLogText = m.lcLogText + ;
+                     ccCRLF + ccSPACEGAP + ;
+                     "- CDX: " + ;
+                     ALLTRIM(TRANSFORM(m.lnCDXSize, "999,999,999,999")) + ;
+                     SPACE(1) + ;
+                     lcFileSizeWarning
+      ENDIF 
+   ENDIF
+      
+CATCH TO loException
+   * Ignore, there is nothing to do if there is no file available
+   
+ENDTRY
+
+TRY
+   lnFPTSize = FSIZE(FORCEEXT(DBF(m.tcAlias), "fpt")) 
+   lcFileSizeWarning = FileSizeWarningCheck(m.lnFPTSize)
+
+   IF EMPTY(lcFileSizeWarning) AND m.tlOnlyIfProblem 
+      * Nothing to print
+   ELSE 
+      IF NOT EMPTY(lcFileSizeWarning)
+         lcLogText = m.lcLogText + ;
+                     ccCRLF + ccSPACEGAP + ;
+                     "- FPT: " + ;
+                     ALLTRIM(TRANSFORM(m.lnFPTSize , "999,999,999,999")) + ;
+                     SPACE(1) + ;
+                     lcFileSizeWarning
+                     
+      ENDIF 
+   ENDIF 
+   
+CATCH TO loException      
+   * Ignore, there is nothing to do if there is no file available
+   
+ENDTRY
+
+SET COMPATIBLE &lcOldCompatible
+
+RETURN m.lcLogText
+
+
+********************************************************************************
+*  METHOD NAME: FileSizeWarningCheck
+*
+*  AUTHOR: Richard A. Schummer, February 2015
+*
+*  METHOD DESCRIPTION:
+*    Process the file sizes of the different data files to see if they are getting
+*    close to the Visual FoxPro 2GB limits.
+*
+*  INPUT PARAMETERS:
+*    tnFileSize = numeric, required, byte size of the file to be checked.
+* 
+*  OUTPUT PARAMETERS:
+*    lcFileSizeStatus = character, output of the file size status.
+* 
+********************************************************************************
+PROCEDURE FileSizeWarningCheck(tnFileSize, tcOption)
+
+LOCAL lcFileSizeStatus, ;
+      lnFileLimitWarningLevel, ;
+      lnPercentage
+
+IF PCOUNT() < 2
+   tcOption = SPACE(0)
+ENDIF 
+
+tnFilesize    = m.tnFilesize * 1.0000000000
+lnTwoGigLimit = cnTWOGIGLIMIT
+
+lnOldDecimals = SET("Decimals")
+
+SET DECIMALS TO 10
+
+IF VARTYPE(tnFileSize) = "N"
+   * The reason for dividing each value by 1024 is to get the math away from the 2GB limit for integers.
+   lnFileLimitWarningLevel = (ROUND((cnTWOGIGLIMIT/1024) * (cnHOWCLOSETOLIMIT/1024), 0)) * 1024
+   lnPercentage            = ROUND((m.tnFileSize/1024) / (m.lnTwoGigLimit/1024), 10) * 100
+ 
+   IF m.tcOption = "FULL"
+      lcFileSizeStatus = ALLTRIM(TRANSFORM(m.lnPercentage, "999.99")) + "% of VFP limit"
+   ELSE
+      lcFileSizeStatus = SPACE(0)
+   ENDIF 
+   
+   IF  m.lnFileLimitWarningLevel > m.tnFileSize
+      * All is good in the world, nothing else to report
+   ELSE
+      * Raise a flag that file is getting close to VFP limits
+      lcFileSizeStatus = m.lcFileSizeStatus +  ;
+                         "WARNING: getting close to file size limit (" + ALLTRIM(TRANSFORM(TRANSFORM(cnHOWCLOSETOLIMIT, "999.99"))) + "%)"
+   ENDIF
+
+   IF NOT EMPTY(m.lcFileSizeStatus)
+      lcFileSizeStatus = "(" + m.lcFileSizeStatus + ")"
+   ENDIF 
+ELSE
+   lcFileSizeStatus = "Valid file size not passed to checker"
+ENDIF 
+
+SET DECIMALS TO (m.lnOldDecimals)
+
+RETURN ALLTRIM(m.lcFileSizeStatus)
 
 
 ********************************************************************************
@@ -522,7 +1023,9 @@ RETURN luReturnVal
 PROCEDURE CloseData()
 
 USE IN (SELECT("curDBCXCoreMeta"))
+USE IN (SELECT("curFreetables"))
+USE IN (SELECT("curMetaCaption"))
 
 RETURN 
 
-*: EOF :* 
+*: EOF :*  

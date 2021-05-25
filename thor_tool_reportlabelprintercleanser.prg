@@ -74,8 +74,16 @@
 * ----------  ----------------------  -------  ---------------------------------
 * 03/14/2015  Richard A. Schummer     1.0      Created Program
 * ----------------------------------------------------------------------------------------
-* 09/20/2015  Richard A. Schummer     1.1      Updated Thor registration information and 
+* 09/20/2015  Richard A. Schummer     2.0      Updated Thor registration information and 
 *                                              general code cleanup
+* ----------------------------------------------------------------------------------------
+* 03/13/2019  Richard A. Schummer     2.3      Allow folder to be passed in as a parameter
+*                                              to allow DevOps to include as part of a 
+*                                              automated build process. Using GetDIR() to 
+*                                              select folder instead of newer style that
+*                                              does not always show the current folder when
+*                                              it opens. Allow to cancel out by not selecting
+*                                              folder.
 * ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
@@ -105,7 +113,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(lxParam1) AND 'thorinfo' == LOWER(lxParam1.Cla
       .Sort          = 0                          && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 2.2, September 20, 2015"           && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 2.3, March 13, 2019"               && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"    && link to a page for this tool
       .VideoLink     = SPACE(0)                                    && link to a video for this tool
@@ -150,6 +158,8 @@ LPARAMETERS lxParam1
 
 LOCAL loException as Exception, ;
       lcOldSafety, ;
+      lcOldDirectory, ;
+      llChangedToFolder, ;
       lcCode, ;
       lcLogText, ;
       llViewContents, ;
@@ -160,67 +170,123 @@ LOCAL loException as Exception, ;
 lcOldSafety = SET("Safety")
 SET SAFETY OFF
 
+lcOldDirectory = FULLPATH(CURDIR())
+
 * Have developer choose the reports folder
-WAIT WINDOW "Select a folder with reports..." NOWAIT NOCLEAR 
-CD ?
-WAIT CLEAR 
-
-* Have developer decide level of logging with content of the Tag, Tag2, and Expr column if data exists
-lnResponse = MESSAGEBOX("Do you want to view the contents of the report printer settings columns in the log?", ;
-                        0+4+32+256, ;
-                        _screen.Caption)
-
-llViewContents = lnResponse = 6
-
-TRY
-   lcLogText = SPACE(0)
-
-   * Process Reports
-   lnFiles   = ADIR(laFiles, "*.frx")
-   lnSorted  = ASORT(laFiles, 1, ALEN(laFiles, 0), 0, 1)
-
-   lcLogText = m.lcLogText + ;
-               ccTOOLNAME + ccCRLF + ccCRLF + ;
-               TRANSFORM(DATETIME()) + ccCRLF + ;
-               "Current Folder: " + LOWER(FULLPATH(CURDIR())) + ccCRLF + ccCRLF + ; 
-               "Reports: " + TRANSFORM(m.lnFiles) + ;
-               SPACE(2) + REPLICATE("*", 40) + ccCRLF + ccCRLF  
-                  
-   IF lnFiles > 0               
-      ScrubPrinterDetails(@laFiles, @lcLogText, llViewContents)
+IF VARTYPE(m.lxParam1) = "C" AND NOT EMPTY(m.lxParam1)
+   llChangedToFolder = .T.
+   
+   TRY 
+      CD (m.lxParam1)
+      
+   CATCH TO loException
+      * Problem changing folders, just force the folder selection manually.
+      llChangedToFolder = .F.
+       
+   ENDTRY
+   
+   IF llChangedToFolder
+      * Nothing to do, keep on processing
+   ELSE
+      * Prompt developer to select the folder.
+      llContinue = PickFolder()
    ENDIF 
-   
-   * Process Labels
-   lnFiles = ADIR(laFiles, "*.lbx")
-   
-   lcLogText = m.lcLogText + ccCRLF + ccCRLF + ;
-               "Labels: " + TRANSFORM(m.lnFiles) + ;
-               SPACE(2) + REPLICATE("*", 40) + ccCRLF + ccCRLF 
-   
-   IF lnFiles > 0               
-      ScrubPrinterDetails(@laFiles, @lcLogText, llViewContents)
-   ENDIF 
-   
-   * Output log
-   STRTOFILE(m.lcLogText, ccLOGFILE, 0)
-   MODIFY FILE (ccLOGFILE) NOEDIT NOWAIT RANGE 1,1
-   
-CATCH TO loException 
-   lcCode = "Error: " + m.loException.Message + ;
-            " [" + TRANSFORM(m.loException.Details) + "] " + ;
-            " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
-            " in " + m.loException.Procedure + ;
-            " on " + TRANSFORM(m.loException.LineNo)
+ELSE
+   * Prompt developer to select the folder.
+   llContinue = PickFolder()
+ENDIF 
 
-   MESSAGEBOX(lcCode, ;
-              0+48, ;
-              _screen.Caption)
- 
-ENDTRY
+IF m.llContinue
+   * Have developer decide level of logging with content of the Tag, Tag2, and Expr column if data exists
+   lnResponse = MESSAGEBOX("Do you want to view the contents of the report printer settings columns in the log?", ;
+                           0+4+32+256, ;
+                           _screen.Caption)
+
+   llViewContents = lnResponse = 6
+
+   TRY
+      lcLogText = SPACE(0)
+
+      * Process Reports
+      lnFiles   = ADIR(laFiles, "*.frx")
+      lnSorted  = ASORT(laFiles, 1, ALEN(laFiles, 0), 0, 1)
+
+      lcLogText = m.lcLogText + ;
+                  ccTOOLNAME + ccCRLF + ccCRLF + ;
+                  TRANSFORM(DATETIME()) + ccCRLF + ;
+                  "Current Folder: " + LOWER(FULLPATH(CURDIR())) + ccCRLF + ccCRLF + ; 
+                  "Reports: " + TRANSFORM(m.lnFiles) + ;
+                  SPACE(2) + REPLICATE("*", 40) + ccCRLF + ccCRLF  
+                     
+      IF lnFiles > 0               
+         ScrubPrinterDetails(@laFiles, @lcLogText, llViewContents)
+      ENDIF 
+      
+      * Process Labels
+      lnFiles = ADIR(laFiles, "*.lbx")
+      
+      lcLogText = m.lcLogText + ccCRLF + ccCRLF + ;
+                  "Labels: " + TRANSFORM(m.lnFiles) + ;
+                  SPACE(2) + REPLICATE("*", 40) + ccCRLF + ccCRLF 
+      
+      IF lnFiles > 0               
+         ScrubPrinterDetails(@laFiles, @lcLogText, llViewContents)
+      ENDIF 
+      
+      * Output log
+      STRTOFILE(m.lcLogText, ccLOGFILE, 0)
+      MODIFY FILE (ccLOGFILE) NOEDIT NOWAIT RANGE 1,1
+      
+   CATCH TO loException 
+      lcCode = "Error: " + m.loException.Message + ;
+               " [" + TRANSFORM(m.loException.Details) + "] " + ;
+               " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
+               " in " + m.loException.Procedure + ;
+               " on " + TRANSFORM(m.loException.LineNo)
+
+      MESSAGEBOX(lcCode, ;
+                 0+48, ;
+                 _screen.Caption)
+    
+   ENDTRY
+ENDIF 
+
+CD (m.lcOldDirectory)
 
 SET SAFETY &lcOldSafety
 
 RETURN  
+
+
+********************************************************************************
+*  METHOD NAME: PickFolder()
+*
+*  AUTHOR: Richard A. Schummer, March 2019
+*
+*  METHOD DESCRIPTION:
+*    Allow developer to pick the folder where the reports are located.
+*
+*  INPUT PARAMETERS:
+*    None
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE PickFolder()
+
+WAIT WINDOW "Select a folder with reports to scrub..." NOWAIT NOCLEAR 
+lcFolder = GETDIR()
+
+IF EMPTY(lcFolder)
+   * Nothing to change to...
+ELSE
+   CD (m.lcFolder)
+ENDIF 
+
+WAIT CLEAR 
+
+RETURN NOT EMPTY(m.lcFolder)
 
 
 ********************************************************************************
