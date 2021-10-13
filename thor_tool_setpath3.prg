@@ -164,6 +164,11 @@
 *                                              the text file. Content of the file should 
 *                                              be the project you want opened automatically.
 * ----------------------------------------------------------------------------------------
+* 09/19/2018  Richard A. Schummer     3.4      Fixed bug where crashed on error when project
+*                                              already open in another session of VFP. Also
+*                                              corrected so it does not twice display 
+*                                              a message about file cannot be open.
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS txParam1
@@ -269,10 +274,10 @@ SET ASSERTS ON
 
 * Make sure that the proper parameter(s) are passed
 IF PCOUNT() = 1 AND VARTYPE(m.tcProjectName) = "C" AND NOT EMPTY(m.tcProjectName)
-   ASSERT FILE(FORCEEXT(m.tcProjectName,"PJX")) MESSAGE "Can't find specified project"
+   ASSERT FILE(FORCEEXT(m.tcProjectName,"PJX")) MESSAGE "Can't find specified project passed in!"
    RETURN 
 ELSE
-   * RAS 17-Jun-2015, for Jody Meyer, added ability to set path for current project
+   * RAS 17-Jun-2015, for Jody Meyer, added ability to set path for currently open and active project
    glOpenAlready = .F.
    llCanceled    = .F.
 
@@ -472,6 +477,16 @@ TRY
 
       USE IN (SELECT("_SetPathProj"))
    
+   CATCH TO loException WHEN loException.ErrorNo = 1705
+      * Project is already open or you don't have proper permissions.
+      lcCode = "Access is denied to the project file ( " + m.tcProjectName + "). It is probably open already in different session of Visual FoxPro or you don't have proper permissions."
+
+      MESSAGEBOX(m.lcCode, ;
+                 0+48, ;
+                 _screen.Caption)
+      
+      llOK = .F.   
+   
    CATCH TO loException
       * Project is most likely already open
       lcCode = "Error: " + m.loException.Message + ;
@@ -488,146 +503,149 @@ TRY
       
    ENDTRY
 
-   TRY
-      MODIFY PROJECT (m.tcProjectName) NOWAIT
+   IF m.llOK
+      TRY
+         MODIFY PROJECT (m.tcProjectName) NOWAIT
+         
+      CATCH TO loException WHEN loException.ErrorNo = 1705
+         * Project is already open or you don't have proper permissions.
+         lcCode = "Access is denied to the project file ( " + m.tcProjectName + "). It is probably open already in different session of Visual FoxPro or you don't have proper permissions."
+
+         MESSAGEBOX(m.lcCode, ;
+                    0+48, ;
+                    _screen.Caption)
+         
+         llOK = .F.   
       
-   CATCH TO loException WHEN loException.ErrorNo = 1705
-      lcCode = "Access is denied to the project file ( " + m.tcProjectName + "). It is probably open already in different session of Visual FoxPro."
+      CATCH TO loException 
+         * Corruption of PJX or not a PJX file as is expected by Visual FoxPro
+         lcCode = "Error: " + m.loException.Message + ;
+                  " [" + TRANSFORM(m.loException.Details) + "] " + ;
+                  " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
+                  " in " + m.loException.Procedure + ;
+                  " on " + TRANSFORM(m.loException.LineNo)
 
-      MESSAGEBOX(m.lcCode, ;
-                 0+48, ;
-                 _screen.Caption)
-      
-      llOK = .F.   
-   
-   CATCH TO loException 
-      * Project is most likely already open
-      lcCode = "Error: " + m.loException.Message + ;
-               " [" + TRANSFORM(m.loException.Details) + "] " + ;
-               " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
-               " in " + m.loException.Procedure + ;
-               " on " + TRANSFORM(m.loException.LineNo)
+         MESSAGEBOX(m.lcCode, ;
+                    0+48, ;
+                    _screen.Caption)
+       
+         llOK = .F.
+         
+      ENDTRY 
 
-      MESSAGEBOX(m.lcCode, ;
-                 0+48, ;
-                 _screen.Caption)
-    
-      llOK = .F.
-      
-   ENDTRY 
+      IF m.llOK
+         loProject = application.ActiveProject
+         lcHomeDir = UPPER(m.loProject.HomeDir)
 
-   IF llOK
-      loProject = application.ActiveProject
-      lcHomeDir = UPPER(m.loProject.HomeDir)
-
-      IF ADDBS(SET("Directory")) <> ADDBS(m.lcHomeDir)
-         CD (m.lcHomeDir)
-      ENDIF
-
-      LogIssue("Opened " + ALLTRIM(m.tcProjectName) + " in project manager - " + TRANSFORM(DATETIME()), "L")
-
-      * Extract all of the files, and use them to
-      * determine the path, and SET PROCEDURE to all
-      * PRG Files and SET CLASSLIB to all class libs
-      IF FILE("liblist.dbf") && For storing program elements
-         LOCAL lcOldSafety
-
-         USE liblist IN 0 EXCLUSIVE
-         lcOldSafety = SET("SAFETY")
-         SET SAFETY OFF
-         ZAP
-         SET SAFETY &lcOldSafety
-      ENDIF
-
-      lnCounter   = 0
-      lnStartSeconds = SECONDS()
-
-      * SET PATH ------------------------------------------------------------
-      SELECT curFolders
-      
-      WAIT WINDOW "Setting path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " folders." NOWAIT 
-      
-      SCAN
-         lcNewPath = ALLTRIM(curFolders.cFolder)
-         IF NOT EMPTY(m.lcNewPath) AND (NOT (";" + m.lcNewPath) $ m.lcPath)
-            lcPath = ALLTRIM(m.lcPath) + ";" + m.lcNewPath
+         IF ADDBS(SET("Directory")) <> ADDBS(m.lcHomeDir)
+            CD (m.lcHomeDir)
          ENDIF
-      ENDSCAN
-      
-      SET PATH TO &lcPath
 
-      LogIssue("Finished setting path from " + TRANSFORM(RECCOUNT("curFolders")) + " folders.", "L")
+         LogIssue("Opened " + ALLTRIM(m.tcProjectName) + " in project manager - " + TRANSFORM(DATETIME()), "L")
 
-      * SET CLASSLIB --------------------------------------------------------
-      SELECT curClassLibs
-      
-      WAIT WINDOW "Setting classlib path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " files."NOWAIT 
-      
-      SCAN
-         * Make sure we have a SET PROCEDURE TO this file
-         lcFile = ALLTRIM(curClassLibs.cClassLib)
-         lcType = ALLTRIM(curClassLibs.cType)
-         
-         IF USED("liblist") 
-            INSERT INTO liblist (mFileName, cType) VALUES (m.lcFile, m.lcType)
-         ENDIF 
-         
-         IF NOT m.lcFile $ SET("ClassLib")
-            TRY
-               SET CLASSLIB TO (m.lcFile) ADDITIVE
-            
-            CATCH TO loException
-               lcErrorLogInfo = TRANSFORM(DATETIME()) + ;
-                                ": (form) " + ;
-                                m.loException.Message + ;
-                                " - " + ;
-                                m.loException.Details + ;
-                                ccCRLF  
-               LogIssue(m.lcErrorLogInfo, "L")
-            
-            ENDTRY
+         * Extract all of the files, and use them to
+         * determine the path, and SET PROCEDURE to all
+         * PRG Files and SET CLASSLIB to all class libs
+         IF FILE("liblist.dbf") && For storing program elements
+            LOCAL lcOldSafety
+
+            USE liblist IN 0 EXCLUSIVE
+            lcOldSafety = SET("SAFETY")
+            SET SAFETY OFF
+            ZAP
+            SET SAFETY &lcOldSafety
          ENDIF
-         
-      ENDSCAN
 
-      LogIssue("Finished setting classlib path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " files.", "L")
-      
-      * SET PROCEDURE -------------------------------------------------------
-      SELECT curPrograms
-      
-      SCAN
-         * Make sure we have a SET PROCEDURE TO this file
-         lcFile = ALLTRIM(curPrograms.cProgram)
-         lcType = ALLTRIM(curPrograms.cType)
-         
-         IF USED("liblist") 
-            INSERT INTO liblist (mFileName, cType) VALUES (m.lcFile, m.lcType)
-         ENDIF 
-         
-         IF NOT m.lcFile $ SET("PROCEDURE")
-            TRY
-               SET PROCEDURE TO (m.lcFile) ADDITIVE
-            
-            CATCH TO loException
-               lcErrorLogInfo = TRANSFORM(DATETIME()) + ;
-                                ": (procedure) " + ;
-                                m.loException.Message + ;
-                                " - " + ;
-                                m.loException.Details + ;
-                                ccCRLF  
-               LogIssue(m.lcErrorLogInfo, "L")
-            
-            ENDTRY
-         ENDIF
-      ENDSCAN
-      
-      LogIssue("Finished setting procedure list from " + TRANSFORM(RECCOUNT("curPrograms")) + " files.", "L")
+         lnCounter   = 0
+         lnStartSeconds = SECONDS()
 
+         * SET PATH ------------------------------------------------------------
+         SELECT curFolders
+         
+         WAIT WINDOW "Setting path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " folders." NOWAIT 
+         
+         SCAN
+            lcNewPath = ALLTRIM(curFolders.cFolder)
+            IF NOT EMPTY(m.lcNewPath) AND (NOT (";" + m.lcNewPath) $ m.lcPath)
+               lcPath = ALLTRIM(m.lcPath) + ";" + m.lcNewPath
+            ENDIF
+         ENDSCAN
+         
+         SET PATH TO &lcPath
+
+         LogIssue("Finished setting path from " + TRANSFORM(RECCOUNT("curFolders")) + " folders.", "L")
+
+         * SET CLASSLIB --------------------------------------------------------
+         SELECT curClassLibs
+         
+         WAIT WINDOW "Setting classlib path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " files."NOWAIT 
+         
+         SCAN
+            * Make sure we have a SET PROCEDURE TO this file
+            lcFile = ALLTRIM(curClassLibs.cClassLib)
+            lcType = ALLTRIM(curClassLibs.cType)
+            
+            IF USED("liblist") 
+               INSERT INTO liblist (mFileName, cType) VALUES (m.lcFile, m.lcType)
+            ENDIF 
+            
+            IF NOT m.lcFile $ SET("ClassLib")
+               TRY
+                  SET CLASSLIB TO (m.lcFile) ADDITIVE
+               
+               CATCH TO loException
+                  lcErrorLogInfo = TRANSFORM(DATETIME()) + ;
+                                   ": (form) " + ;
+                                   m.loException.Message + ;
+                                   " - " + ;
+                                   m.loException.Details + ;
+                                   ccCRLF  
+                  LogIssue(m.lcErrorLogInfo, "L")
+               
+               ENDTRY
+            ENDIF
+            
+         ENDSCAN
+
+         LogIssue("Finished setting classlib path from " + TRANSFORM(RECCOUNT("curClasslibs")) + " files.", "L")
+         
+         * SET PROCEDURE -------------------------------------------------------
+         SELECT curPrograms
+         
+         SCAN
+            * Make sure we have a SET PROCEDURE TO this file
+            lcFile = ALLTRIM(curPrograms.cProgram)
+            lcType = ALLTRIM(curPrograms.cType)
+            
+            IF USED("liblist") 
+               INSERT INTO liblist (mFileName, cType) VALUES (m.lcFile, m.lcType)
+            ENDIF 
+            
+            IF NOT m.lcFile $ SET("PROCEDURE")
+               TRY
+                  SET PROCEDURE TO (m.lcFile) ADDITIVE
+               
+               CATCH TO loException
+                  lcErrorLogInfo = TRANSFORM(DATETIME()) + ;
+                                   ": (procedure) " + ;
+                                   m.loException.Message + ;
+                                   " - " + ;
+                                   m.loException.Details + ;
+                                   ccCRLF  
+                  LogIssue(m.lcErrorLogInfo, "L")
+               
+               ENDTRY
+            ENDIF
+         ENDSCAN
+         
+         LogIssue("Finished setting procedure list from " + TRANSFORM(RECCOUNT("curPrograms")) + " files.", "L")
+
+      ENDIF 
+
+      USE IN (SELECT("curFolders"))
+      USE IN (SELECT("curClassLibs"))
+      USE IN (SELECT("curPrograms"))
    ENDIF 
-
-   USE IN (SELECT("curFolders"))
-   USE IN (SELECT("curClassLibs"))
-   USE IN (SELECT("curPrograms"))
 
 CATCH TO loException
    lcCode = "Error: " + m.loException.Message + ;
@@ -667,6 +685,7 @@ IF FILE(m.lcDeveloperHookProgram)
                        " - " + ;
                        m.loException.Details + ;
                        ccCRLF
+      
       LogIssue(m.lcErrorLogInfo, "L")
 
    ENDTRY
@@ -688,8 +707,11 @@ ENDIF
 lcTimeMessage = "Processed set paths for " + LOWER(m.tcProjectName) + " in " + TRANSFORM(m.lnTimeToProcessProject) + " seconds..."
 WAIT WINDOW (m.lcTimeMessage) NOWAIT 
 
-lnFiles = application.ActiveProject.Files.Count
-LogIssue(TRANSFORM(lnFiles) + " file" + IIF(lnFiles = 1, SPACE(0), "s") + " in the project", "L")
+IF m.llOK
+   lnFiles = application.ActiveProject.Files.Count
+   LogIssue(TRANSFORM(lnFiles) + " file" + IIF(lnFiles = 1, SPACE(0), "s") + " in the project", "L")
+ENDIF 
+
 LogIssue(m.lcTimeMessage, "L")
 LogIssue(REPLICATE("-", 80))
 
@@ -702,6 +724,7 @@ STRTOFILE(FILETOSTR(gcSetPathPassErrorLogFile) + ccCRLF + FILETOSTR(m.gcSetPathP
 
 SET SAFETY &lcOldSafety
 
+* Remove the temporary file created for this pass
 DELETE FILE (m.gcSetPathPassErrorLogFile) RECYCLE 
 
 * Clean up the public variables.

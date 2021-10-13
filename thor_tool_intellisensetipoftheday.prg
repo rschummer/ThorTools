@@ -67,6 +67,8 @@
 *                                              function parameters for function entries.
 *                                              Removed Special types, and blank Abbreviation
 * ----------------------------------------------------------------------------------------
+* 05/28/2021  Richard A. Schummer     1.3      Removed showing deleted records
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS txParam1
@@ -183,6 +185,8 @@ LOCAL lnOldDataSessionID, ;
 TRY 
    lnOldDataSessionID = SET("Datasession")
    loSession          = CREATEOBJECT("Session")
+   
+   SET DELETED ON 
    
    SET DATASESSION TO (m.loSession.DataSessionID)
    
