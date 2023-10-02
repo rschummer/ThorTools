@@ -137,7 +137,7 @@ PROCEDURE ToolCode
 
 #DEFINE ccCRLF      CHR(13)+CHR(10)
 #DEFINE ccLOGFILE   "DBCNumericOverflowCheckLog.txt"
-#DEFINE ccTOOL      "WLC Numeric Overflow Locator- DBC"
+#DEFINE ccTOOL      "WLC Numeric Overflow Locator - DBC"
 
 LOCAL lcOldSafety, ;
       lcLogText, ;
@@ -192,18 +192,22 @@ TRY
    ELSE
       WAIT WINDOW "Opening database, please wait..." NOWAIT 
       
-      OPEN DATABASE (lcDBCFile) SHARED 
-      SET DATABASE TO (JUSTSTEM(lcDBCFile))
+      OPEN DATABASE (m.lcDBCFile) SHARED 
+      SET DATABASE TO (JUSTSTEM(m.lcDBCFile))
 
-      lcLogText = lcLogText + ;
+      lcLogText = m.lcLogText + ;
                   ccTOOL + ccCRLF + ;
                   "DBC: " + LOWER(FULLPATH(DBC())) + ccCRLF + ;
-                  "Current Folder: " + FULLPATH(CURDIR()) + ccCRLF + ccCRLF
+                  "Current Folder: " + FULLPATH(CURDIR()) + ccCRLF + ccCRLF + ;
+                  "Search for 'ERROR' to find the overflow conditions" + ccCRLF + ccCRLF
       
       WAIT WINDOW "Determining number of tables to analyze" NOWAIT            
       lnTables  = ADBOBJECTS(laTables, "TABLE")
 
-      FOR lnJ = 1 TO lnTables
+      * RAS 07-Mar-2023, sort the tables in alpha order, ascending.
+      ASORT(laTables, 1, m.lnTables, 0, 0)
+      
+      FOR lnJ = 1 TO m.lnTables
          lcFile = laTables[lnJ]
          
          IF EMPTY(m.lcFile)
@@ -223,9 +227,9 @@ TRY
                SELECT curChkOverflow
                
                lnFields  = AFIELDS(laFields, "curChkOverflow")
-               lnOpened  = lnOpened + 1 
-               lcLogText = lcLogText + ;
-                           PADL(TRANSFORM(lnJ), LENC(TRANSFORM(lnTables)), "0") + ")  " + ;
+               lnOpened  = m.lnOpened + 1 
+               lcLogText = m.lcLogText + ;
+                           PADL(TRANSFORM(m.lnJ), LENC(TRANSFORM(m.lnTables)), "0") + ")  " + ;
                            ALLTRIM(laTables[lnJ]) + " successfully opened..." + ;
                            " with " + TRANSFORM(RECCOUNT("curChkOverflow")) + " rows - " + ;
                            FULLPATH(DBF("curChkOverflow")) + ;
@@ -236,7 +240,7 @@ TRY
                            "...(" + TRANSFORM(lnJ) + " of " + TRANSFORM(lnTables) + ")" ;
                     NOWAIT NOCLEAR 
 
-               m.lcNumericFields = SPACE(0)
+               lcNumericFields = SPACE(0)
 
                FOR m.lnI = 1 TO m.lnFields
                   m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
@@ -256,9 +260,9 @@ TRY
 
                IF EMPTY(m.lcNumericFields)
                   * Nothing to scan, note it in the log.
-                  lcLogText = lcLogText + "NO Numeric Fields" + ccCRLF
+                  lcLogText = m.lcLogText + "NO Numeric Fields" + ccCRLF
                ELSE 
-                  lcLogText = lcLogText + "Numeric Fields: " + ccCRLF + m.lcNumericFields + ccCRLF
+                  lcLogText = m.lcLogText + "Numeric Fields: " + ccCRLF + m.lcNumericFields + ccCRLF
                   lnRows    = 0 
 
                   SCAN        
@@ -271,17 +275,17 @@ TRY
                         *       values in proper range with error 1988 (Currency value is out of range.)
                         IF VARTYPE(m.luValue) = "N"
                            * Determine the maximum value that should fit properly
-                           lnLenWholePart      = laFields[lnI,3] - laFields[lnI,4] - IIF(laFields[lnI,4] > 0, 1, 0)
-                           lnLenDecimalPart    = laFields[lnI,4]
-                           lnLenFullSize       = laFields[lnI,3]
+                           lnLenWholePart      = laFields[m.lnI,3] - laFields[m.lnI,4] - IIF(laFields[m.lnI,4] > 0, 1, 0)
+                           lnLenDecimalPart    = laFields[m.lnI,4]
+                           lnLenFullSize       = laFields[m.lnI,3]
                            
                            * Check if Integer with 4,0 definition
-                           IF laFields[lnI,2] = "I" AND laFields[lnI,3] = 4 AND laFields[lnI,4] = 0
+                           IF laFields[m.lnI,2] = "I" AND laFields[m.lnI,3] = 4 AND laFields[m.lnI,4] = 0
                               * Integer columns have fixed limit
                               lnMaxPosShouldFitValue = 2147483647
-                              lnMaxPosVFPJamsInValue = lnMaxPosShouldFitValue
+                              lnMaxPosVFPJamsInValue = m.lnMaxPosShouldFitValue
                               lnMaxNegShouldFitValue = -2147483647
-                              lnMaxNegVFPJamsInValue = lnMaxNegShouldFitValue
+                              lnMaxNegVFPJamsInValue = m.lnMaxNegShouldFitValue
                            ELSE 
                               * Rest have column size limit set by developer
                               lnMaxPosShouldFitValue = VAL(REPLICATE("9", m.lnLenWholePart) + "." + REPLICATE("9", m.lnLenDecimalPart))
@@ -294,17 +298,17 @@ TRY
                            IF m.luValue > m.lnMaxPosVFPJamsInValue OR m.luValue < m.lnMaxNegVFPJamsInValue
                               lnFailed  = m.lnFailed + 1 
                               lcLogText = m.lcLogText + ;
-                                          "VFP Numeric Overflow on record " + ;
+                                          "ERROR: VFP Numeric Overflow on record " + ;
                                           TRANSFORM(RECNO("curChkOverflow")) + ;
                                           " in field: " + ;
                                           LOWER(FIELD(m.lnI, "curChkOverflow")) + ;
                                           ccCRLF
                            ELSE 
                               * Secondly, check if the data exceeds the natural design of the column.
-                              IF m.luValue > lnMaxPosShouldFitValue OR m.luValue < lnMaxNegShouldFitValue
+                              IF m.luValue > m.lnMaxPosShouldFitValue OR m.luValue < m.lnMaxNegShouldFitValue
                                  lnFailed  = m.lnFailed + 1 
                                  lcLogText = m.lcLogText + ;
-                                             "Column Design Numeric Overflow on record " + ;
+                                             "ERROR: Column Design Numeric Overflow on record " + ;
                                              TRANSFORM(RECNO("curChkOverflow")) + ;
                                              " in field: " + ;
                                              LOWER(FIELD(m.lnI, "curChkOverflow")) + ;
@@ -319,7 +323,7 @@ TRY
                lcLogText = m.lcLogText + ;
                            "Overflow conditions discovered: " + TRANSFORM(m.lnFailed) + REPLICATE(ccCRLF, 3)
                
-               lnTableProblem = lnTableProblem + IIF(m.lnFailed > 0, 1, 0)
+               lnTableProblem = m.lnTableProblem + IIF(m.lnFailed > 0, 1, 0)
                
                USE IN (SELECT("curChkOverflow"))
                
@@ -447,7 +451,7 @@ ELSE
    ENDCASE
 ENDIF 
 
-RETURN lcReturnVal
+RETURN m.lcReturnVal
 
 
 *: EOF :*  
