@@ -3,7 +3,7 @@
 *
 *  AUTHOR: Richard A. Schummer, November 2014
 *
-*  COPYRIGHT © 2014-2015   All Rights Reserved.
+*  COPYRIGHT © 2014-2026   All Rights Reserved.
 *     White Light Computing, Inc.
 *     Rick Schummer
 *     PO Box 391
@@ -34,12 +34,14 @@
 *     a single table.
 *
 *  CALLING SYNTAX:
-*     DO Thor_Tool_ScanTableForNumericOverflow.prg
-*     Thor_Tool_ScanTableForNumericOverflow()
+*     DO Thor_Tool_ScanTableForNumericOverflow.prg [ WITH <table name> ]
+*     Thor_Tool_ScanTableForNumericOverflow(<table name>)
 *
 *  INPUT PARAMETERS:
 *     lxParam1 = unknown data type, typically the standard Thor object passed to register
 *                the tool with Thor and appear on the Thor menu.
+*
+*                if character, it should be a table name (with or without path).
 *
 *  OUTPUT PARAMETERS:
 *     None
@@ -66,14 +68,21 @@
 *     Visual FoxPro 09.00.0000.7423 or higher
 * 
 ******************************************************************************************
-*                             C H A N G E    L O G                              
+*                                  C H A N G E    L O G                                   
 *
 *    Date     Developer               Version  Description
-* ----------  ----------------------  -------  ---------------------------------
+* ----------  ----------------------  -------  -------------------------------------------
 * 11/01/2014  Richard A. Schummer     1.0      Created Program
 * ----------------------------------------------------------------------------------------
 * 09/20/2015  Richard A. Schummer     1.1      Updated Thor registration information and 
 *                                              general code cleanup
+* ----------------------------------------------------------------------------------------
+* 03/18/2026  Richard A. Schummer     1.2      Updated to pass in parameter with table name,
+*                                              note if record is deleted (now checks is deleted 
+*                                              records have issue), and skip all General 
+*                                              fields to avoid error during EVAL(), and 
+*                                              move log file to temp folder. Added progress
+*                                              meter via WAIT WINDOW.
 * ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
@@ -82,11 +91,11 @@ LPARAMETERS lxParam1
 IF PCOUNT() = 1 AND 'O' = VARTYPE(m.lxParam1) AND 'thorinfo' == LOWER(m.lxParam1.Class)
    WITH m.lxParam1
       * Required
-      .Prompt         = 'Find Numeric Overflow in DBF' && used in menus
+      .Prompt         = 'Find Numeric Overflow columns in DBF' && used in menus
       
       * Optional
       TEXT TO .Description NOSHOW PRETEXT 1+2 && a description for the tool
-         This program rolls through a selected DBF and finds numeric overflow conditions in the table's numeric columns.      
+         This program rolls through a specified or selected DBF and finds numeric overflow conditions in the table's numeric columns.      
       ENDTEXT  
       
       .StatusBarText   = 'Scan through a FoxPro table and look for numeric overflow stars in numeric columns.'
@@ -98,7 +107,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(m.lxParam1) AND 'thorinfo' == LOWER(m.lxParam1
       .Sort          = 0              && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 1.1, September 20, 2015"           && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 1.2, March 18, 2026"               && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"    && link to a page for this tool
       .VideoLink     = SPACE(0)                                    && link to a video for this tool
@@ -132,34 +141,56 @@ RETURN
 *    None
 * 
 ********************************************************************************
-PROCEDURE ToolCode
+PROCEDURE ToolCode(tcTable)
 
 #DEFINE ccCRLF      CHR(13) + CHR(10)
 #DEFINE ccLOGFILE   "NumericOverflowCheckLog.txt"
+#DEFINE ccLOGFOLDER ADDBS(SYS(2023))
 #DEFINE ccTOOL      "WLC Numeric Overflow Locator - Single Table"
 
-LOCAL laFields[1], ;
-      lcCode, ;
-      lcFile, ;
+LOCAL lcFile, ;
+      lcOldConsole, ;
+      lcOldSafety, ;
+      lcOldDeleted, ;
       lnFails, ;
       lnFields, ;
       lnI, ;
       lnRows, ;
-      loException AS Exception, ;
-      luValue, ;
       lcLogFile, ;
-      lcOldSafety
+      laFields[1], ;
+      lnNumericColCount, ;
+      luValue, ;
+      lnLenWholePart, ;
+      lnLenDecimalPart, ;
+      lnLenFullSize, ;
+      lnMaxPosShouldFitValue, ;
+      lnMaxPosVFPJamsInValue, ;
+      lnMaxNegShouldFitValue, ;
+      lnMaxNegVFPJamsInValue, ;
+      lcMessage, ;
+      loException as Exception, ;
+      lcCode
 
-CLEAR 
+CLEAR
 
-m.lcFile = GETFILE("dbf")
+IF PCOUNT() = 1 AND VARTYPE(m.tcTable) = "C"
+   m.lcFile = FORCEEXT(ALLTRIM(m.tcTable), "dbf")
+ELSE
+   m.lcFile = GETFILE("dbf")
+ENDIF
 
 IF EMPTY(m.lcFile)
    * Nothing to do
 ELSE
-   TRY 
+   TRY
+      lcOldConsole = SET("Console")
+      SET CONSOLE OFF
+
       lcOldSafety = SET("Safety")
       SET SAFETY OFF
+
+      lcOldDeleted = SET("Deleted")
+      SET DELETED OFF
 
       lnFails  = 0
       lnFields = 0
@@ -170,117 +201,187 @@ ELSE
       USE (m.lcFile) IN 0 SHARED AGAIN ALIAS curChkOverflow
       SELECT curChkOverflow
 
-      lcLogFile = FORCEEXT(JUSTSTEM(ccLOGFILE) + "_" + LOWER(JUSTSTEM(DBF("curChkOverflow"))), "txt")
-      
-      lcOldConsole = SET("Console")
-      
-      SET CONSOLE OFF 
-      SET ALTERNATE TO (lcLogFile)
-      SET ALTERNATE ON 
-      
+      lcLogFile = ccLOGFOLDER + FORCEEXT(JUSTSTEM(ccLOGFILE) + "_" + LOWER(JUSTSTEM(DBF("curChkOverflow"))), "txt")
+
+      SET ALTERNATE TO (m.lcLogFile)
+      SET ALTERNATE ON
+
       ? ccTOOL
       ? DATETIME()
       ? SPACE(0)
       ? LOWER(DBF("curChkOverflow"))
-      
-      lnFields  = AFIELDS(laFields, "curChkOverflow")
-      
+
+      lnFields          = AFIELDS(laFields, "curChkOverflow")
+      lnNumericColCount = 0
+
+      ? SPACE(0)
       ? "Numeric Columns:"
-      
+
       FOR lnI = 1 TO lnFields
-         m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+         * Skip over General fields which throws an error
+         IF laFields[lnI, 2] = "G"
+            LOOP 
+         ELSE
+            m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+         ENDIF 
          
          IF VARTYPE(m.luValue) = "N"
             ? TRANSFORM(lnI, "9999") + ")", LOWER(FIELD(m.lnI, "curChkOverflow")), "-", ;
-              "Type:", DataTypeTranslator(UPPER(laFields[lnI,2])) + ",", ;
-              "Size:", TRANSFORM(laFields[lnI,3]) + "," + TRANSFORM(laFields[lnI,4])
-         ENDIF 
-      ENDFOR 
-      
-      ? SPACE(0)
+               "Type:", DataTypeTranslator(UPPER(laFields[lnI, 2])) + ",", ;
+               "Size:", TRANSFORM(laFields[lnI, 3]) + "," + TRANSFORM(laFields[lnI, 4])
 
-      SCAN        
-         lnRows = m.lnRows + 1 
+            lnNumericColCount = m.lnNumericColCount + 1
+         ENDIF
+      ENDFOR
+
+      IF m.lnNumericColCount = 0
+         ? " - This table does not have any numeric columns of any kind."
+      ENDIF
+
+      ? SPACE(0)
+      
+      lnRecordCount = RECCOUNT()
+
+      SCAN
+         lnRows = m.lnRows + 1
+         
+         DisplayProgressMeter(m.lnRows, m.lnRecordCount, 5)
 
          FOR m.lnI = 1 TO m.lnFields
-            m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
-            
+            * Skip over General fields which throws an error
+            IF laFields[lnI, 2] = "G"
+               LOOP 
+            ELSE
+               luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+            ENDIF 
+
             * NOTE: Currency does not evaluate to numeric, but VFP enforces 
             *       values in proper range with error 1988 (Currency value is out of range.)
             IF VARTYPE(m.luValue) = "N"
                * Determine the maximum value that should fit properly
-               lnLenWholePart      = laFields[lnI,3] - laFields[lnI,4] - IIF(laFields[lnI,4] > 0, 1, 0)
-               lnLenDecimalPart    = laFields[lnI,4]
-               lnLenFullSize       = laFields[lnI,3]
-               
+               lnLenWholePart   = laFields[lnI, 3] - laFields[lnI, 4] - IIF(laFields[lnI, 4] > 0, 1, 0)
+               lnLenDecimalPart = laFields[lnI, 4]
+               lnLenFullSize    = laFields[lnI, 3]
+
                * Check if Integer with 4,0 definition
-               IF laFields[lnI,2] = "I" AND laFields[lnI,3] = 4 AND laFields[lnI,4] = 0
+               IF laFields[lnI, 2] = "I" AND laFields[lnI, 3] = 4 AND laFields[lnI, 4] = 0
                   * Integer columns have fixed limit
                   lnMaxPosShouldFitValue = 2147483647
                   lnMaxPosVFPJamsInValue = lnMaxPosShouldFitValue
                   lnMaxNegShouldFitValue = -2147483647
                   lnMaxNegVFPJamsInValue = lnMaxNegShouldFitValue
-               ELSE 
+               ELSE
                   * Rest have column size limit set by developer
                   lnMaxPosShouldFitValue = VAL(REPLICATE("9", m.lnLenWholePart) + "." + REPLICATE("9", m.lnLenDecimalPart))
                   lnMaxPosVFPJamsInValue = VAL(REPLICATE("9", m.lnLenFullSize))
-                  lnMaxNegShouldFitValue = VAL(REPLICATE("9", m.lnLenWholePart -1) + "." + REPLICATE("9", m.lnLenDecimalPart)) * (-1)
+                  lnMaxNegShouldFitValue = VAL(REPLICATE("9", m.lnLenWholePart - 1) + "." + REPLICATE("9", m.lnLenDecimalPart)) * (-1)
                   lnMaxNegVFPJamsInValue = VAL(REPLICATE("9", m.lnLenFullSize - 1)) * (-1)
-               ENDIF 
-               
+               ENDIF
+
                * First check if hard core "stars" VFP overflow condition that throws errors
                IF m.luValue > m.lnMaxPosVFPJamsInValue OR m.luValue < m.lnMaxNegVFPJamsInValue
-                  lnFails = m.lnFails + 1 
-                  ? "VFP Numeric Overflow on record " + TRANSFORM(RECNO("curChkOverflow")) + " in field: " + LOWER(FIELD(m.lnI, "curChkOverflow"))
-               ELSE 
+                  lnFails = m.lnFails + 1
+                  ? "VFP Numeric Overflow on record " + TRANSFORM(RECNO("curChkOverflow")) + IIF(DELETED(), " (DELETED record)", SPACE(0)) + " in field: " + LOWER(FIELD(m.lnI, "curChkOverflow")) 
+               ELSE
                   * Secondly, check if the data exceeds the natural design of the column.
                   IF m.luValue > lnMaxPosShouldFitValue OR m.luValue < lnMaxNegShouldFitValue
-                     lnFails = m.lnFails + 1 
-                     ? "Column Design Numeric Overflow on record " + TRANSFORM(RECNO("curChkOverflow")) + " in field: " + LOWER(FIELD(m.lnI, "curChkOverflow"))
-                  ENDIF 
+                     lnFails = m.lnFails + 1
+                     ? "Column Design Numeric Overflow on record " + TRANSFORM(RECNO("curChkOverflow")) + IIF(DELETED(), " (DELETED record)", SPACE(0)) + " in field: " + LOWER(FIELD(m.lnI, "curChkOverflow"))
+                  ENDIF
                ENDIF
-            ENDIF 
-         ENDFOR 
+            ENDIF
+         ENDFOR
       ENDSCAN
       
+      WAIT CLEAR 
+
       USE IN (SELECT("curChkOverflow"))
 
       lcMessage = "Total records: " + TRANSFORM(m.lnRows) + ccCRLF + ;
-                  "Total failures found: " + TRANSFORM(m.lnFails) 
-                  
+         "Total failures found: " + TRANSFORM(m.lnFails)
+
       ? SPACE(0)
-      ? lcMessage 
+      ? m.lcMessage
       ? SPACE(0)
       ? DATETIME()
-      ? SPACE(0)                       
+      ? SPACE(0)
 
       SET ALTERNATE OFF
-      SET ALTERNATE TO 
-      SET CONSOLE &lcOldConsole 
+      SET ALTERNATE TO
 
-      MODIFY FILE (lcLogFile) NOEDIT NOWAIT RANGE 1,1
-                 
-   CATCH TO m.loException 
-      IF m.loException.ErrorNo = 1
-         lcCode = "Error: " + m.loException.Message + ;
-            " [" + TRANSFORM(m.loException.Details) + "] " 
+      MODIFY FILE (m.lcLogFile) NOEDIT NOWAIT RANGE 1, 1
 
-         MESSAGEBOX(m.lcCode, ;
-                    0+48, ;
-                    _screen.Caption)
-      ELSE 
-         lcCode = "Error: " + m.loException.Message + ;
-            " [" + TRANSFORM(m.loException.Details) + "] " + ;
-            " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
-            " in " + m.loException.Procedure + ;
-            " on " + TRANSFORM(m.loException.LineNo)
+   CATCH TO m.loException
+      IF m.loException.ERRORNO = 1
+         lcCode = "Error: " + m.loException.MESSAGE + ;
+            " [" + TRANSFORM(m.loException.DETAILS) + "] "
 
          MESSAGEBOX(m.lcCode, ;
-                    0+48, ;
-                    _screen.Caption)
-      ENDIF  
+            0 + 48, ;
+            _SCREEN.CAPTION)
+      ELSE
+         lcCode = "Error: " + m.loException.MESSAGE + ;
+            " [" + TRANSFORM(m.loException.DETAILS) + "] " + ;
+            " (" + TRANSFORM(m.loException.ERRORNO) + ")" + ;
+            " in " + m.loException.PROCEDURE + ;
+            " on " + TRANSFORM(m.loException.LINENO)
+
+         MESSAGEBOX(m.lcCode, ;
+            0 + 48, ;
+            _SCREEN.CAPTION)
+      ENDIF
+
+   FINALLY
+      * Clean up, just in case of error
+      SET ALTERNATE OFF
+      SET ALTERNATE TO
+
+      * Normal clean up
+      SET CONSOLE &lcOldConsole
+      SET DELETED &lcOldDeleted
+
    ENDTRY
+ENDIF
+
+RETURN
+
+
+********************************************************************************
+*  METHOD NAME: DisplayProgressMeter
+*
+*  AUTHOR: Richard A. Schummer, March 2026
+*
+*  METHOD DESCRIPTION:
+*    tnRows = (required), integer, number of rows processed to this point in time.
+*    tnRecordCount =(required) integer, number of rows to be processed.
+*    tnEveryPercentageToReportProgress = integer, defaults to 10, increments of 
+*                                        percentage to display the progress.
+*
+*  INPUT PARAMETERS:
+*    None
+* 
+*  OUTPUT PARAMETERS:
+*    None
+* 
+********************************************************************************
+PROCEDURE DisplayProgressMeter(tnRows, tnRecordCount, tnEveryPercentageToReportProgress)
+
+LOCAL nEveryPercentageToReportProgress, ;
+      lnPercent, ;
+      lnPercentRounded
+      
+IF PCOUNT() < 3
+   lnEveryPercentageToReportProgress = 10
+ELSE 
+   lnEveryPercentageToReportProgress = m.tnEveryPercentageToReportProgress
 ENDIF 
+
+lnPercent        = (m.tnRows / m.tnRecordCount) * 100
+lnPercentRounded = ROUND(m.lnPercent, 0)
+
+IF MOD(m.lnPercentRounded, m.lnEveryPercentageToReportProgress) = 0
+   WAIT WINDOW REPLICATE("|", m.lnPercentRounded) + " (" + TRANSFORM(m.lnPercentRounded) + "%)" NOWAIT NOCLEAR
+ENDIF
 
 RETURN 
 
@@ -304,10 +405,10 @@ PROCEDURE DataTypeTranslator(tcDataType)
 
 LOCAL lcReturnVal
 
-IF VARTYPE(tcDataType) # "C"
+IF VARTYPE(m.tcDataType) # "C"
    lcReturnVal = "Bad parameter"
 ELSE
-   tcDataType = UPPER(tcDataType)
+   tcDataType = UPPER(m.tcDataType)
 
    DO CASE
       CASE tcDataType = "I"
@@ -358,7 +459,6 @@ ELSE
    ENDCASE
 ENDIF 
 
-RETURN lcReturnVal
-
+RETURN m.lcReturnVal
 
 *: EOF :* 

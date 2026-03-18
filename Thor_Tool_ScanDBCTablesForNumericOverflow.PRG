@@ -77,6 +77,11 @@
 * ----------------------------------------------------------------------------------------
 * 09/21/2015  Richard A. Schummer     1.2      Alternative way of checking instead of stars. 
 * ----------------------------------------------------------------------------------------
+* 03/18/2026  Richard A. Schummer     1.3      Note if record is deleted (now checks is deleted 
+*                                              records have issue), and skip all General 
+*                                              fields to avoid error during EVAL(), and 
+*                                              move log file to temp folder.
+* ----------------------------------------------------------------------------------------
 *
 ******************************************************************************************
 LPARAMETERS lxParam1
@@ -84,14 +89,14 @@ LPARAMETERS lxParam1
 IF PCOUNT() = 1 AND 'O' = VARTYPE(m.lxParam1) AND 'thorinfo' == LOWER(m.lxParam1.Class)
    WITH m.lxParam1
       * Required
-      .Prompt         = 'Find Numeric Overflow in DBFs of DBC' && used in menus
+      .Prompt         = 'Find Numeric Overflow columns in DBFs of DBC' && used in menus
       
       * Optional
       TEXT TO .Description NOSHOW PRETEXT 1+2 && a description for the tool
-         This program scans through all tables in a Database Container, folder, or DBCX metadata to find numeric overflow conditions in the table's numeric columns. 
+         This program scans through all tables in a Database Container to find numeric overflow conditions in the table's numeric columns. 
       ENDTEXT  
       
-      .StatusBarText   = 'Scan through a FoxPro table and look for numeric overflow stars in numeric columns'
+      .StatusBarText   = 'Scan through a Visual FoxPro table for all tables in DBC, and look for numeric overflow stars in numeric columns'
       .CanRunAtStartUp = .F.
 
       * These are used to group and sort tools when they are displayed in menus or the Thor form
@@ -100,7 +105,7 @@ IF PCOUNT() = 1 AND 'O' = VARTYPE(m.lxParam1) AND 'thorinfo' == LOWER(m.lxParam1
       .Sort          = 0                          && the sort order for all items from the same Category
       
       * For public tools, such as PEM Editor, etc.
-      .Version       = "Version 1.1, September 20, 2015"           && e.g., 'Version 7, May 18, 2011'
+      .Version       = "Version 1.3, March 18, 2026"               && e.g., 'Version 7, May 18, 2011'
       .Author        = "Rick Schummer"
       .Link          = "https://github.com/rschummer/ThorTools"    && link to a page for this tool
       .VideoLink     = SPACE(0)                                    && link to a video for this tool
@@ -137,6 +142,7 @@ PROCEDURE ToolCode
 
 #DEFINE ccCRLF      CHR(13)+CHR(10)
 #DEFINE ccLOGFILE   "DBCNumericOverflowCheckLog.txt"
+#DEFINE ccLOGFOLDER ADDBS(SYS(2023))
 #DEFINE ccTOOL      "WLC Numeric Overflow Locator - DBC"
 
 LOCAL lcOldSafety, ;
@@ -166,11 +172,14 @@ LOCAL lcOldSafety, ;
       loException, ;
       lcCode
 
-TRY
-   CLEAR 
+CLEAR 
 
+TRY
    lcOldSafety = SET("Safety")
    SET SAFETY OFF
+
+   lcOldDeleted = SET("Deleted")
+   SET DELETED OFF
 
    CD ?
 
@@ -243,7 +252,12 @@ TRY
                lcNumericFields = SPACE(0)
 
                FOR m.lnI = 1 TO m.lnFields
-                  m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+                  * Skip over General fields which throws an error
+                  IF laFields[lnI, 2] = "G"
+                     LOOP 
+                  ELSE
+                     m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+                  ENDIF 
                
                   IF VARTYPE(m.luValue) = "N"
                      m.lcNumericFields = m.lcNumericFields + ;
@@ -269,7 +283,11 @@ TRY
                      lnRows = m.lnRows + 1 
                      
                      FOR m.lnI = 1 TO m.lnFields
-                        m.luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+                        IF laFields[lnI, 2] = "G"
+                           LOOP 
+                        ELSE
+                           luValue = EVALUATE(FIELD(m.lnI, "curChkOverflow"))
+                        ENDIF 
                      
                         * NOTE: Currency does not evaluate to numeric, but VFP enforces 
                         *       values in proper range with error 1988 (Currency value is out of range.)
@@ -300,6 +318,7 @@ TRY
                               lcLogText = m.lcLogText + ;
                                           "ERROR: VFP Numeric Overflow on record " + ;
                                           TRANSFORM(RECNO("curChkOverflow")) + ;
+                                          IIF(DELETED(), " (DELETED record)", SPACE(0)) + ;
                                           " in field: " + ;
                                           LOWER(FIELD(m.lnI, "curChkOverflow")) + ;
                                           ccCRLF
@@ -310,6 +329,7 @@ TRY
                                  lcLogText = m.lcLogText + ;
                                              "ERROR: Column Design Numeric Overflow on record " + ;
                                              TRANSFORM(RECNO("curChkOverflow")) + ;
+                                             IIF(DELETED(), " (DELETED record)", SPACE(0)) + ;
                                              " in field: " + ;
                                              LOWER(FIELD(m.lnI, "curChkOverflow")) + ;
                                              ccCRLF
@@ -330,17 +350,17 @@ TRY
             CATCH TO m.loException 
                IF m.loException.ErrorNo = 1
                   lcCode = "Error: " + m.loException.Message + ;
-                     " [" + TRANSFORM(m.loException.Details) + "] " 
+                           " [" + TRANSFORM(m.loException.Details) + "] " 
 
                   MESSAGEBOX(m.lcCode, ;
                              0+48, ;
                              _screen.Caption)
                ELSE 
                   lcCode = "Error: " + m.loException.Message + ;
-                     " [" + TRANSFORM(m.loException.Details) + "] " + ;
-                     " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
-                     " in " + m.loException.Procedure + ;
-                     " on " + TRANSFORM(m.loException.LineNo)
+                           " [" + TRANSFORM(m.loException.Details) + "] " + ;
+                           " (" + TRANSFORM(m.loException.ErrorNo) + ")" + ;
+                           " in " + m.loException.Procedure + ;
+                           " on " + TRANSFORM(m.loException.LineNo)
 
                   MESSAGEBOX(m.lcCode, ;
                              0+48, ;
@@ -359,8 +379,8 @@ TRY
                TRANSFORM(m.lnTableProblem) + " tables have numeric overflow problem" + ccCRLF + ccCRLF + ;
                ccTOOL + " is complete: " + TRANSFORM(DATETIME())
    
-   STRTOFILE(lcLogText, ccLOGFILE, 0)
-   MODIFY FILE (ccLOGFILE) NOEDIT NOWAIT RANGE 1,1
+   STRTOFILE(lcLogText, ccLOGFOLDER + ccLOGFILE, 0)
+   MODIFY FILE (ccLOGFOLDER + ccLOGFILE) NOEDIT NOWAIT RANGE 1,1
    
 CATCH TO m.loException
    lcCode = "Error: " + m.loException.Message + ;
@@ -372,6 +392,10 @@ CATCH TO m.loException
    MESSAGEBOX(m.lcCode, ;
               0+48, ;
               _screen.Caption)
+
+FINALLY
+   * Normal clean up
+   SET DELETED &lcOldDeleted
 
 ENDTRY 
 
@@ -452,6 +476,5 @@ ELSE
 ENDIF 
 
 RETURN m.lcReturnVal
-
 
 *: EOF :*  
